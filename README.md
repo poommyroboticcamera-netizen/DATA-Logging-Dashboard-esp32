@@ -1,30 +1,108 @@
+<div align="center">
+
+<img src="docs/assets/readme-hero.svg" alt="ESP32 Data Logging Dashboard project overview" width="100%">
+
 # ESP32 Data Logging Dashboard
 
-**ระบบแสดงผลและบันทึกข้อมูลเซนเซอร์ผ่าน Wi-Fi สำหรับ ESP32**
+**A real-time sensor monitor and data logger for ESP32, built with FreeRTOS and an embedded web dashboard.**
 
-FreeRTOS · Local web dashboard · CSV / SD logging · Browser-based IMU 3D
+[![Platform](https://img.shields.io/badge/platform-ESP32-0B1220?style=for-the-badge&logo=espressif&logoColor=38BDF8)](https://www.espressif.com/en/products/socs/esp32)
+[![Framework](https://img.shields.io/badge/framework-Arduino-0B1220?style=for-the-badge&logo=arduino&logoColor=22C55E)](https://www.arduino.cc/)
+[![Build](https://img.shields.io/badge/build-PlatformIO-0B1220?style=for-the-badge&logo=platformio&logoColor=F59E0B)](https://platformio.org/)
+[![Runtime](https://img.shields.io/badge/runtime-FreeRTOS-0B1220?style=for-the-badge&logo=freertos&logoColor=A78BFA)](https://www.freertos.org/)
 
-อ่านอุณหภูมิ แรงดัน กระแส ความเร่ง และ Encoder พร้อมหน้าเว็บฝังใน firmware เปิดจากคอมพิวเตอร์หรือโทรศัพท์ในเครือข่ายเดียวกัน งานวาดโมเดล 3D ประมวลผลบนเบราว์เซอร์
+[Getting started](#getting-started) · [Hardware map](#hardware-map) · [Data logging](#data-logging) · [Hardware assets](hardware/README.md) · [Troubleshooting](docs/troubleshooting.md)
 
-> **สถานะ:** โปรเจกต์สำหรับพัฒนาและทดสอบฮาร์ดแวร์ มีชุดทดสอบซอฟต์แวร์ แต่ความถูกต้องของการวัดและความเสถียรระยะยาวต้องตรวจบนบอร์ดจริง
+</div>
 
-[เริ่มใช้งาน](#quick-start) · [การต่อสาย](#hardware-map) · [ไฟล์ออกแบบ](hardware/README.md) · [แก้ปัญหา](docs/troubleshooting.md)
+---
+
+## Overview
+
+This project turns an ESP32 into a compact telemetry hub for electrical, environmental, motion, and speed measurements. The firmware samples sensors in dedicated FreeRTOS tasks, publishes a responsive dashboard over the local Wi-Fi network, and records structured CSV data for later analysis in Excel or another data tool.
+
+The dashboard is compiled into the firmware, so no separate filesystem upload is required. Live charts, controls, and the optional IMU orientation model run in the browser to keep the ESP32 workload predictable.
+
+> [!IMPORTANT]
+> This repository is an engineering prototype. Software checks are included, but measurement accuracy, electrical safety, and long-duration stability must still be validated on the target PCB.
+
+## Project at a glance
+
+| Capability | Implementation | Default |
+|:--|:--|:--|
+| Live monitoring | Embedded responsive web dashboard | Local Wi-Fi |
+| Data capture | Browser CSV and optional SD card logging | 250 ms interval |
+| Current sensing | Three independent INA226 channels | 1 mΩ shunt per channel |
+| Temperature | One DHT22 and four DS18B20 inputs | Separate GPIO lines |
+| Motion | MPU6050 or MPU6500 acceleration, roll, pitch, and yaw | Approx. 50 Hz |
+| Speed | Quadrature encoder, shaft RPM, wheel RPM, and km/h | 360 P/R, 100 mm wheel |
+| Output control | MCP23017 GA0–GA3 manual control and chase sequence | 2 Hz chase |
+| Runtime | FreeRTOS tasks split across both ESP32 cores | Sensors on Core 1, web on Core 0 |
 
 ## Features
 
-- INA226 ×3 พร้อมตั้ง Rshunt แยกช่อง
-- DHT22 และ DS18B20 ×4 แบบแยก GPIO
-- MCP7940N RTC และ MPU6050 / MPU6500 IMU
-- Encoder quadrature แสดง RPM และความเร็วล้อ
-- ปุ่มเริ่ม–หยุดบันทึก และไฟ Debug ที่ตั้งความเร็วแยกจากรอบบันทึก
-- MCP23017: GA0–GA3 และไฟไล่ที่ตั้งความถี่ได้
-- CSV สำหรับ Excel บน SD หรือเก็บข้อมูลที่รับผ่านเบราว์เซอร์
-- โมเดลสี่เหลี่ยม 3D เปิด–ปิดได้ เริ่มต้นปิดเพื่อลดภาระหน้าเว็บ
-- การตั้งค่าอุปกรณ์ รอบบันทึก Encoder, Rshunt และความเร็วไฟเก็บใน NVS
+| Real-time telemetry | Reliable recording | Runtime control |
+|:--|:--|:--|
+| Voltage, current, power, temperature, orientation, RPM, and speed | Fixed-column CSV with validity and data-age fields | Enable or disable each sensor from the dashboard |
+| Three INA226 gauges and four independent DS18B20 channels | Browser-side IndexedDB buffer and CSV download | Set logging interval from 100 ms to 60 s |
+| Optional browser-rendered 3D IMU model capped at approximately 20 FPS | Optional FAT16/FAT32 SD card storage | Configure INA226 shunts, encoder geometry, and debug LED speed |
+| Sensor status, stale-data detection, and health endpoints | Start and stop buttons create separate recording sessions | Control GA0–GA3 or run an adjustable chase pattern |
 
-## Quick start
+## System architecture
 
-ติดตั้ง Git และ PlatformIO CLI หรือ PlatformIO IDE ใน VS Code
+```mermaid
+flowchart LR
+    subgraph C1[ESP32 Core 1]
+        S[Sensor tasks]
+        E[Encoder task]
+        C[Capture control]
+    end
+
+    subgraph Shared[Thread-safe state]
+        M[Latest snapshot]
+        Q[Bounded log queue]
+    end
+
+    subgraph C0[ESP32 Core 0]
+        W[HTTP and API server]
+        D[SD writer]
+    end
+
+    S --> M
+    E --> M
+    C --> Q
+    M --> C
+    Q --> D
+    M --> W
+    W --> B[Browser dashboard]
+    B --> CSV[Charts, 3D model, and CSV]
+```
+
+Each sensor task owns its device. I²C access is serialized with a mutex, while the web server reads a shared snapshot instead of polling hardware directly. The task watchdog remains enabled.
+
+## Hardware map
+
+The I²C bus uses **GPIO21 for SDA**, **GPIO22 for SCL**, and a default clock of **100 kHz**.
+
+| Device | GPIO / address | Notes |
+|:--|:--|:--|
+| INA226 CH1 / CH2 / CH3 | `0x40` / `0x45` / `0x44` | Independent 1 mΩ defaults |
+| MCP23017 | `0x27` | GA3 → GA2 → GA1 → GA0 chase order |
+| MCP7940N RTC | `0x6F` | Oscillator and time must be initialized |
+| MPU6050 / MPU6500 | `0x68` or `0x69` | Accepts WHO_AM_I `0x68` or `0x70` |
+| DHT22 | GPIO4 | Pulse capture uses the ESP32 RMT peripheral |
+| DS18B20 1 / 2 / 3 / 4 | GPIO27 / 16 / 13 / 14 | One sensor on each data line |
+| Encoder A / B | GPIO32 / GPIO33 | 360 P/R, quadrature ×4 |
+| SD CS / SCK / MISO / MOSI | GPIO5 / 18 / 19 / 23 | SPI, FAT16 or FAT32 |
+| Record START / STOP | GPIO36 / GPIO39 | Active LOW, external pull-ups required |
+| Debug LED | GPIO2 | Active HIGH; blinks only while recording |
+| 12 V supply sense | GPIO15 | Disabled while Wi-Fi is active because GPIO15 uses ADC2 |
+
+Each DS18B20 data line needs the pull-up used by the board design. The current firmware expects four separate GPIO lines; do not electrically join the four data pins.
+
+## Getting started
+
+### 1. Clone the repository
 
 ```powershell
 git clone https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32.git
@@ -32,7 +110,15 @@ cd DATA-Logging-Dashboard-esp32
 Copy-Item include/wifi_config.example.h include/wifi_config.h
 ```
 
-แก้ `include/wifi_config.h` เป็นเครือข่าย **2.4 GHz** และรหัสผ่านของคุณ ไฟล์นี้ไม่ถูกส่งขึ้น Git
+On macOS or Linux, use:
+
+```sh
+cp include/wifi_config.example.h include/wifi_config.h
+```
+
+### 2. Configure Wi-Fi
+
+Edit `include/wifi_config.h` and enter the credentials for a **2.4 GHz** network:
 
 ```cpp
 constexpr const char *WIFI_SSID = "YOUR_WIFI_SSID";
@@ -40,115 +126,85 @@ constexpr const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 constexpr bool SERIAL_IP_ONLY = true;
 ```
 
+The local Wi-Fi file is excluded from Git, which prevents credentials from being committed accidentally.
+
+### 3. Build and upload
+
+Install PlatformIO CLI or the PlatformIO extension for VS Code, then run:
+
 ```sh
 pio run -e esp32dev
 pio run -e esp32dev -t upload
 pio device monitor -b 115200
 ```
 
-ปิด Serial Monitor อื่นก่อน Upload เมื่อเชื่อมต่อสำเร็จ Serial แสดง `http://<ESP32-IP>/` เปิดจากเครื่องในเครือข่ายเดียวกัน หลังอัปเดตเว็บให้กด `Ctrl+F5`
+Close any other Serial Monitor before uploading. After a successful connection, the ESP32 prints a URL such as `http://192.168.1.50/`. Open that address from a device on the same network. Use `Ctrl+F5` after installing a new dashboard build.
 
-หน้าเว็บถูกบีบอัดและฝังอัตโนมัติระหว่าง build ไม่ต้อง Upload Filesystem และไม่ต้องมี SD เพื่อเปิด dashboard
+No SD card is required to display the dashboard. The build script compresses the HTML, CSS, and JavaScript and embeds them directly in the firmware image.
 
-### Board configuration
+### 4. Confirm the board controls
 
-ตรวจ [include/runtime_config.h](include/runtime_config.h) ก่อน Upload: ปุ่มเริ่มปัจจุบัน **GPIO36**, ปุ่มหยุด **GPIO39**, active LOW และใช้ pull-up ภายนอก ส่วน Debug LED ใช้ GPIO2 active HIGH
+Review [`include/runtime_config.h`](include/runtime_config.h) before uploading. The current defaults assign START to GPIO36 and STOP to GPIO39. Both inputs are active LOW and require external pull-ups. An earlier schematic revision placed SW1 on GPIO34, so confirm the PCB revision and actual trace before relying on the labels.
 
-**schematic รุ่นก่อนระบุ SW1 ที่ GPIO34 แต่ไฟล์ตั้งค่าปัจจุบันใช้ GPIO36** ต้องเทียบกับการต่อจริง ค่าที่เคยตั้งใน NVS มีผลเหนือค่าเริ่มต้นที่เกี่ยวข้อง
+## Data logging
 
-## Hardware map
-
-I²C: **SDA = GPIO21, SCL = GPIO22**, 100 kHz
-
-| อุปกรณ์ | ขา / Address | หมายเหตุ |
-|---|---|---|
-| INA226 CH1 / CH2 / CH3 | `0x40` / `0x45` / `0x44` | Rshunt เริ่มต้น 1 mΩ ต่อช่อง |
-| MCP23017 | `0x27` | GA3 → GA2 → GA1 → GA0 |
-| MCP7940N RTC | `0x6F` | ต้องตั้งเวลาและเริ่ม oscillator |
-| MPU6050 / MPU6500 | `0x68` หรือ `0x69` | WHO_AM_I `0x68` / `0x70` |
-| DHT22 | GPIO4 | RMT รับพัลส์ |
-| DS18B20 · 1 / 2 / 3 / 4 | GPIO27 / 16 / 13 / 14 | DATA แยกหนึ่งตัวต่อขา |
-| Encoder A / B | GPIO32 / GPIO33 | 360 P/R, quadrature ×4 |
-| SD CS / SCK / MISO / MOSI | GPIO5 / 18 / 19 / 23 | SPI, FAT16/FAT32 |
-| Supply sense | GPIO15 | ปิดอ่าน เพราะ ADC2 ใช้ร่วมกับ Wi-Fi |
-
-DS18B20 ใช้ 3.3V, GND ร่วม และ pull-up ตามวงจร ห้ามรวม DATA ทั้งสี่ GPIO เข้าด้วยกันใน firmware รุ่นนี้
-
-## Recording
-
-1. เปิดเครื่อง: แสดงค่าปัจจุบัน แต่ยังไม่บันทึกและไฟ Debug ดับ
-2. เปิดอุปกรณ์ที่ต้องการจาก dashboard แล้วกดปุ่มเริ่ม
-3. กดปุ่มหยุด: หยุดเก็บ snapshot ใหม่และดับไฟ หน้าเว็บยังแสดงข้อมูลสด
-4. กดเริ่มอีกครั้ง: แยกเป็นรอบใหม่
+1. Power the board and open the dashboard. Live readings appear without starting a recording.
+2. Enable the sensors that should be included.
+3. Press START on the PCB or dashboard. The debug LED begins blinking and a new session is created.
+4. Press STOP to close the session and turn off the debug LED. Live monitoring continues.
 
 ### Browser CSV
 
-เปิดหน้าเว็บค้างไว้ระหว่างบันทึก ข้อมูลที่รับสำรองใน IndexedDB เมื่อหยุดจะมีไฟล์ให้ดาวน์โหลด เปิดดาวน์โหลดอัตโนมัติได้ตามสิทธิ์ของ browser
-
-การเก็บขึ้นกับ Wi-Fi และ browser อาจพลาดช่วงข้อมูลเมื่อรอบสั้นหรือซ่อนแท็บ ไม่มีการเติมค่าที่ไม่ได้รับ ใช้ **หนึ่งแท็บบันทึกต่อ origin** เพื่อหลีกเลี่ยงข้อมูลชนกัน เปลี่ยน IP/browser จะเห็นที่เก็บคนละชุด ควรดาวน์โหลดข้อมูลสำคัญเก็บแยก
+Keep one dashboard tab open while recording. Received samples are buffered in IndexedDB and can be downloaded as CSV. Browser capture depends on Wi-Fi delivery and browser scheduling; missed packets are not synthesized. Use one recording tab per ESP32 address and download important sessions before changing the board IP or browser profile.
 
 ### SD card
 
-ตั้ง `ENABLE_SD_LOGGING = true` และเปิด SD บน dashboard การ์ดเริ่ม mount เมื่อเริ่มบันทึก เก็บที่ `/logs/log_00001.csv` และเลขถัดไป งานที่เข้าคิวก่อนหยุดอาจเขียนต่อให้เสร็จ
+Set `ENABLE_SD_LOGGING = true` in `include/runtime_config.h` and enable SD from the dashboard. The card mounts when recording starts and files are created as `/logs/log_00001.csv`, `/logs/log_00002.csv`, and so on.
 
-- ต้องใช้ **FAT16/FAT32**; framework ปัจจุบันไม่รองรับ exFAT/NTFS
-- การ์ด 128 GB มักเป็น exFAT ตรวจระบบไฟล์และสำรองข้อมูลก่อนฟอร์แมต
-- `sd_available` คือความสามารถใน firmware ดู `sd_mounted`, `sd_status`, `sd_written` เพื่อยืนยันการเขียนจริง
-- ถ้าไม่มีการ์ด ตั้ง `ENABLE_SD_LOGGING = false` เพื่อไม่เริ่มงาน SD
+The ESP32 SD library used by this project requires **FAT16 or FAT32**. Large cards, including many 128 GB models, are commonly supplied as exFAT and must be repartitioned and formatted to FAT32 before use. Back up the card before formatting it.
 
-### Timing and units
+The dashboard reports separate states for firmware support, card mounting, and successful writes. Check `sd_mounted`, `sd_status`, and `sd_written` rather than treating availability alone as proof that data reached the card.
 
-| รายการ | ค่า / ช่วง |
-|---|---|
-| รอบบันทึก | 100–60000 ms, เริ่มต้น 250 ms |
-| Debug LED | 40–2000 ms ต่อรอบติด–ดับ, เริ่มต้น 100 ms |
-| GA chase | 0.2–20 Hz ต่อการเปลี่ยนขา, เริ่มต้น 2 Hz |
-| INA / RTC | ประมาณ 500 ms |
-| DHT22 / DS18B20 | ประมาณ 2.5 s / 1 s |
-| IMU | ประมาณ 50 Hz, ±8g / ±1000°/s |
-| Encoder | ประมาณ 100 ms |
+## Timing and calibration
 
-GA 2 Hz = 500 ms ต่อขา = 2 s ครบสี่ขา เป็นไฟไล่ ไม่ใช่ PWM รอบบันทึกที่เร็วกว่าการวัดจะเก็บค่าล่าสุดซ้ำได้ มีอายุข้อมูลและ validity กำกับ ค่าที่ใช้ไม่ได้ถูกเว้นว่าง ไม่แทนด้วยศูนย์
+| Parameter | Range / default |
+|:--|:--|
+| Recording interval | 100–60,000 ms / **250 ms** |
+| Debug LED full cycle | 40–2,000 ms / **100 ms** |
+| GA chase frequency | 0.2–20 Hz / **2 Hz** |
+| INA226 and RTC update | Approx. 500 ms |
+| DHT22 update | Approx. 2.5 s |
+| DS18B20 update | Approx. 1 s |
+| IMU update | Approx. 50 Hz, ±8 g and ±1,000°/s |
+| Encoder calculation | Approx. 100 ms |
 
-Encoder เริ่มต้น 360 P/R, ล้อ 100 mm, อัตราทด 1; Rshunt 1 mΩ = 0.001 Ω ต้องปรับให้ตรงฮาร์ดแวร์จริง
+A recording interval shorter than a sensor update period repeats the latest sample with its age and validity flags. Invalid readings remain empty in CSV instead of being replaced by zero.
 
-## IMU visualization
+The encoder defaults to 360 pulses per revolution, a 100 mm wheel diameter, and a 1:1 shaft ratio. Each INA226 channel defaults to a 1 mΩ shunt. Adjust these values to match the installed hardware.
 
-Canvas 3D ใช้ข้อมูลเดิม ไม่มี request หรือ task อ่านเพิ่มบน ESP32 จำกัดประมาณ 20 FPS และปิดได้ ปุ่มมุมอ้างอิงเปลี่ยนเฉพาะภาพ ไม่เปลี่ยน CSV
+### IMU orientation
 
-Yaw เป็นมุมสะสมรอบแกน Z ของบอร์ด ต้องอยู่นิ่งประมาณ 4 s เพื่อคาลิเบรต อาจ drift ไม่ใช่เข็มทิศหรือทิศทางที่ชดเชยการเอียงครบทุกแกน Roll/Pitch อาศัยแรงโน้มถ่วงและอาจไม่พร้อมเมื่อสั่นแรง ภาพเป็นท่าทางโดยประมาณ ไม่ใช่ตำแหน่งเคลื่อนที่
+Yaw is integrated around the board's Z axis after a short stationary calibration. Keep the board level and still for approximately four seconds after startup. Because the system has no magnetometer, yaw can drift over time and is not a compass heading. Roll and pitch use gravity and may be temporarily unavailable during strong vibration or linear acceleration.
 
-## Architecture
+The optional 3D orientation block is rendered in the browser using values already returned by the API. Turning it on does not add another sensor task or request stream on the ESP32.
 
-```mermaid
-flowchart LR
-  Sensors[เซนเซอร์ / Encoder] --> Acquisition[Core 1: sensor tasks]
-  Switches[Start / Stop] --> Capture[Core 1: capture control]
-  Acquisition --> State[Snapshot + mutex]
-  State --> Capture
-  Capture --> Queue[Bounded queue]
-  Queue --> SD[Core 0: SD writer]
-  State --> Web[Core 0: HTTP server]
-  Web --> Browser[Browser: dashboard / 3D / CSV]
-```
-
-แต่ละอุปกรณ์มี task เจ้าของ แบ่งปัน I²C ผ่าน mutex เว็บอ่าน snapshot แทนการอ่านเซนเซอร์โดยตรง และยังเปิด watchdog
-
-## Repository layout
+## Repository structure
 
 ```text
-src/main.cpp                Firmware / FreeRTOS tasks
-include/                    Runtime config และตัวอย่าง Wi-Fi
-dashboard/                  HTML / CSS / JS และโมเดล 3D
-scripts/                    Embed dashboard / CSV verification
-tests/firmware_csv/          Host test harness
-docs/                       คู่มือแก้ปัญหา
-hardware/schematic/         ต้นฉบับวงจรและ PDF exports
-hardware/pcb/               Layout, Gerber, drill และ BOM
-hardware/3d/                CAD, STEP/STL และภาพตัวอย่าง
+.
+├── src/                         ESP32 firmware and FreeRTOS tasks
+├── include/                     Runtime configuration and Wi-Fi example
+├── dashboard/                   Embedded HTML, CSS, JavaScript, and tests
+├── scripts/                     Dashboard embedding and CSV verification
+├── tests/firmware_csv/          Host-side CSV test harness
+├── docs/                        Troubleshooting and documentation assets
+└── hardware/
+    ├── schematic/               Editable sources and PDF/SVG exports
+    ├── pcb/                     Layout sources and manufacturing outputs
+    └── 3d/                      CAD sources, STEP/STL exports, and previews
 ```
 
-โฟลเดอร์ hardware เตรียมไว้เพิ่มไฟล์ในอนาคต **ยังไม่มีชุดไฟล์ออกแบบหรือผลิตที่ยืนยันแล้ว**
+The hardware directories are prepared for future schematic, PCB, and 3D files. They currently contain documentation placeholders rather than production-approved design outputs.
 
 ## Validation
 
@@ -160,12 +216,24 @@ python scripts/test_firmware_csv.py
 pio run -e esp32dev
 ```
 
-CSV harness ใช้ Python, Node.js และ g++/clang++ หรือ WSL ที่มี g++ บน Windows ตรวจ 77 คอลัมน์กับ parser จริง รวมข้อมูลปิด/เก่า/ผิดพลาด ไม่แทนการทดสอบเซนเซอร์และความเสถียรบนบอร์ด
+The host-side harness validates the 77-column CSV schema and parser behavior for disabled, stale, and invalid sensor values. These checks complement physical hardware tests; they do not replace calibration or endurance testing on the assembled board.
 
-## Project notes
+## Diagnostics
 
-- Serial แสดง URL และเหตุรีเซ็ตผิดปกติ ดู `/api/health` และ `/api/state` เพิ่มได้
-- [รายละเอียด dashboard](dashboard/README.md) · [แก้ปัญหา](docs/troubleshooting.md)
-- ออกแบบสำหรับเครือข่ายภายใน ไม่มี login ไม่ควรเปิดพอร์ตออกอินเทอร์เน็ต
-- ไม่เก็บ Wi-Fi credentials, build output หรือบันทึกการทดลองใน Git
-- ยังไม่ได้กำหนด license สำหรับโค้ดโปรเจกต์; dependencies ใช้เงื่อนไขของเจ้าของแต่ละรายการ
+The firmware exposes `/api/health` and `/api/state` for runtime inspection. Serial output is intentionally compact and normally shows only the dashboard URL and abnormal reset information. For wiring, stale readings, SD mounting, and Wi-Fi issues, see the [troubleshooting guide](docs/troubleshooting.md).
+
+## Security and project status
+
+The web interface is intended for a trusted local network and does not implement authentication. Do not forward it directly to the public internet. Wi-Fi credentials, build output, and experiment recordings are excluded from version control.
+
+No project license has been selected yet. Until a license is added, the repository remains publicly viewable but does not grant general permission to copy, modify, or redistribute the code. Third-party libraries remain subject to their own licenses.
+
+---
+
+<div align="center">
+
+**Designed for observable, repeatable ESP32 hardware testing.**
+
+[Dashboard details](dashboard/README.md) · [Hardware workspace](hardware/README.md) · [Report an issue](https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32/issues)
+
+</div>
