@@ -11,3 +11,5 @@
 *.jpg binary
 *.zip binary
 *.stl binary
+*.step binary
+*.stp binary

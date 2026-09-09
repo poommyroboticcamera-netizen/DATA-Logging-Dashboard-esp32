@@ -109,6 +109,23 @@ The I²C bus uses **GPIO21 for SDA**, **GPIO22 for SCL**, and a default clock of
 
 Each DS18B20 data line needs the pull-up used by the board design. The current firmware expects four separate GPIO lines; do not electrically join the four data pins.
 
+## Hardware design files
+
+<div align="center">
+
+<a href="hardware/README.md"><img src="hardware/3d/previews/dashboard-pcb-assembly-2026-09-08.png" alt="ESP32 Data Logging Dashboard PCB assembly" width="82%"></a>
+
+</div>
+
+| Design asset | Available file |
+|:--|:--|
+| Electrical schematic | [Five-page PDF](hardware/schematic/exports/dashboard-schematic-2026-09-09.pdf) |
+| PCB layout | [Five-page PDF](hardware/pcb/exports/dashboard-pcb-layout-2026-09-09.pdf) |
+| 3D assembly | [STEP AP214 model](hardware/3d/exports/dashboard-pcb-assembly-2026-09-08.step) |
+| Hardware documentation | [Revision notes and directory guide](hardware/README.md) |
+
+The files are reference design exports rather than a released manufacturing package. Verify the current schematic, PCB, firmware pin map, component footprints, and mechanical dimensions together before fabrication.
+
 ## Getting started
 
 ### 1. Clone the repository
