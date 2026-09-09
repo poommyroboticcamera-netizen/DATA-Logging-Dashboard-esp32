@@ -1,0 +1,4 @@
+Configuration headers
+
+Copy wifi_config.example.h to wifi_config.h for local credentials.
+runtime_config.h contains board defaults. dashboard_page.h is generated during build.
