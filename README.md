@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/dashboard-preview.jpg" alt="ESP32 Data Logging Dashboard desktop interface" width="100%">
+<a href="https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/"><img src="docs/assets/dashboard-preview.jpg" alt="ESP32 Data Logging Dashboard desktop interface" width="100%"></a>
 
-<sub>Rendered from the dashboard files embedded in the firmware. Representative sensor values are shown for presentation.</sub>
+<sub>Click the dashboard to open the interactive demo. Representative sensor values are shown for presentation.</sub>
 
 # ESP32 Data Logging Dashboard
 
@@ -12,8 +12,9 @@
 [![Framework](https://img.shields.io/badge/framework-Arduino-0B1220?style=for-the-badge&logo=arduino&logoColor=22C55E)](https://www.arduino.cc/)
 [![Build](https://img.shields.io/badge/build-PlatformIO-0B1220?style=for-the-badge&logo=platformio&logoColor=F59E0B)](https://platformio.org/)
 [![Runtime](https://img.shields.io/badge/runtime-FreeRTOS-0B1220?style=for-the-badge&logo=freertos&logoColor=A78BFA)](https://www.freertos.org/)
+[![Live Demo](https://img.shields.io/badge/live-interactive_demo-2563EB?style=for-the-badge&logo=githubpages&logoColor=white)](https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/)
 
-[Getting started](#getting-started) · [Hardware map](#hardware-map) · [Data logging](#data-logging) · [Hardware assets](hardware/README.md) · [Troubleshooting](docs/troubleshooting.md)
+[Live demo](https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/) · [Getting started](#getting-started) · [Hardware map](#hardware-map) · [Data logging](#data-logging) · [Hardware assets](hardware/README.md) · [Troubleshooting](docs/troubleshooting.md)
 
 </div>
 
@@ -27,6 +28,12 @@ The dashboard is compiled into the firmware, so no separate filesystem upload is
 
 > [!IMPORTANT]
 > This repository is an engineering prototype. Software checks are included, but measurement accuracy, electrical safety, and long-duration stability must still be validated on the target PCB.
+
+## Interactive demo
+
+Open the **[live GitHub Pages demo](https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/)** to explore the complete interface without an ESP32. You can scroll through every panel, enable or disable sensors, control GA0–GA3, change the GA chase frequency, adjust the logging interval, edit encoder and shunt settings, and turn on the browser-rendered IMU model.
+
+The demo is rebuilt from the same HTML, CSS, and JavaScript embedded in the firmware. A browser-only API simulator provides representative values; demo controls affect only the current browser tab and never connect to hardware.
 
 ## Project at a glance
 
