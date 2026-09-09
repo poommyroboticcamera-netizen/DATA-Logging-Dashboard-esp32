@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/readme-hero.svg" alt="ESP32 Data Logging Dashboard project overview" width="100%">
+<img src="docs/assets/dashboard-preview.jpg" alt="ESP32 Data Logging Dashboard desktop interface" width="100%">
+
+<sub>Rendered from the dashboard files embedded in the firmware. Representative sensor values are shown for presentation.</sub>
 
 # ESP32 Data Logging Dashboard
 
