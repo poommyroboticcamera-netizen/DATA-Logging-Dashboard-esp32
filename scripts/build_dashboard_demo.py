@@ -2,6 +2,7 @@
 
 from argparse import ArgumentParser
 from pathlib import Path
+import base64
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ def replace_once(html: str, marker: str, content: str) -> str:
 
 def build(output: Path) -> None:
     html = (UI / "index.html").read_text(encoding="utf-8")
+    html = replace_once(html, '__COMPANY_LOGO__', 'data:image/png;base64,' + base64.b64encode((UI / 'assets/somboon-logo.png').read_bytes()).decode('ascii'))
     html = replace_once(html, "/*__STYLE__*/", (UI / "style.css").read_text(encoding="utf-8"))
     html = replace_once(html, "/*__CORE__*/", (UI / "core.js").read_text(encoding="utf-8"))
     html = replace_once(html, "/*__MODEL__*/", (UI / "imu-model.js").read_text(encoding="utf-8"))

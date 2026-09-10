@@ -14,6 +14,20 @@ assert.equal(M.sample({...packet,yaw_valid:'0',yaw_deg:''}).yawValid,false);
 assert.equal(M.sample({...packet,roll_deg:''}),null);
 assert.equal(M.sample({...packet,tilt_valid:'0'}),null);
 assert.equal(M.sample({...packet,pitch_deg:'Infinity'}),null);
+near(M.sample({...packet,yaw_valid:'0',yaw_deg:''},30).q,M.sample(packet).q);
+// Uneven network arrivals are interpolated on a delayed display timeline.
+const history=new M.PoseBuffer(350);
+history.push(M.attitude(0,0,0),0);
+history.push(M.attitude(0,0,20),200);
+history.push(M.attitude(0,0,47),470);
+near(M.rotate(history.at(685),[1,0,0]),M.rotate(M.attitude(0,0,33.5),[1,0,0]));
+near(history.at(2000),M.attitude(0,0,47)); // Never extrapolate through a dropout.
+assert.equal(history.pending(2000),false);
+history.clear();assert.equal(history.at(2000),null);
+history.push(M.attitude(0,0,179),0);history.push(M.attitude(0,0,-179),200);
+near(M.rotate(history.at(450),[1,0,0]),[-1,0,0]);
+for(let i=1;i<=100;i++)history.push(M.attitude(0,0,i),200+i);
+assert.ok(history.samples.length<=32);
 
 // Exercise browser lifecycle without a network or a board.
 let time=0, paints=0, timer, frames=[], intersect, resize;

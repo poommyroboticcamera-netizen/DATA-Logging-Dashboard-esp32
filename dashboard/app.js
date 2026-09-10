@@ -79,9 +79,21 @@
     }
   }
   function recordingUI() {
+    recordingTime();
     $('row-count').textContent = (session.active?.rows.length || 0).toLocaleString();
     $('record-pill').textContent = session.active ? 'กำลังเก็บ' : 'พร้อม'; $('record-pill').className = 'pill' + (session.active ? ' on' : '');
     $('save').disabled = !session.active?.rows.length;
+  }
+  function recordingTime() {
+    const record = session.active || files[0];
+    const start = record ? Date.parse(record.started) : NaN;
+    const now = Date.now();
+    const end = session.active ? (lastSuccess && now - lastSuccess > 2500 ? lastSuccess : now) : Date.parse(record?.ended);
+    const seconds = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1000)) : 0;
+    $('record-duration').textContent = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map(n => String(n).padStart(2, '0')).join(':');
+    $('record-time-label').textContent = session.active || !record ? 'เวลาที่บันทึก' : 'เวลาบันทึกรอบล่าสุด';
+    $('record-started').textContent = Number.isFinite(start) ? new Date(start).toLocaleTimeString('th-TH', {hour12:false}) : '—';
+    $('record-started').title = Number.isFinite(start) ? new Date(start).toLocaleString('th-TH') : '';
   }
   function updateGauge(key, value, max) {
     const scale = C.gauge(value, max);
@@ -388,6 +400,7 @@
       setTimeout(pollNext, Math.min(250, Math.max(100, currentInterval / 2)));
     }
     pollNext();
+    setInterval(recordingTime, 1000);
   }
   init();
 })();

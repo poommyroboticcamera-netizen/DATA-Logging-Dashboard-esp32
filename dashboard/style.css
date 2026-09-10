@@ -26,3 +26,66 @@ main{padding:0 26px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 
 .imu-scene{position:relative;overflow:hidden;border:1px solid #283c56;border-radius:10px;background:radial-gradient(ellipse at 50% 45%,#162a44 0%,#0a1321 75%);margin:16px 0 12px}.imu-scene canvas{display:block;width:100%;height:300px}.imu-scene-label{position:absolute;top:12px;left:14px;color:#8ca5c3;font:10px monospace;letter-spacing:1.2px;pointer-events:none}.imu-model-actions{display:flex;gap:8px;flex-wrap:wrap}.imu-model-actions button{width:auto;flex:1;font-size:12px;padding:8px;white-space:nowrap}.imu-model-actions button[aria-pressed=true]{border-color:#53dec0;color:#53dec0}@media(max-width:540px){.imu-scene canvas{height:250px}}
 
 .imu-scene-off canvas{visibility:hidden}.imu-scene-off::after{content:"3D ปิดอยู่ · กดเปิดเมื่อต้องการดูโมเดล";position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;color:#92a4b8;font-size:13px}
+
+/* Instrument console: compact monitoring surface, full-width telemetry. */
+.record-timing{display:flex;justify-content:space-between;gap:16px;border-top:1px solid #49614c;margin:12px 0;padding-top:12px;flex-wrap:wrap}.record-timing>div{display:flex;flex-direction:column;gap:4px}.record-timing span{font-size:12px;color:#b3c7b8}.record-timing strong{font:500 26px/1.3 Consolas,monospace;font-variant-numeric:tabular-nums;color:#b4e8ac;letter-spacing:1px}.record-timing .record-start{text-align:right}.record-start strong{font-size:16px;color:#d9e7dc;letter-spacing:0}
+.company-logo{position:fixed;top:16px;left:21px;width:146px;padding:10px 14px;background:#f5f7fb;border:1px solid #dce3ef;border-radius:7px;z-index:6;display:block}.company-logo img{display:block;width:100%;height:auto}.sidebar .brand{margin-top:128px}
+@media(min-width:781px) and (max-width:1199px){.company-logo{left:8px;top:18px;width:60px;padding:5px}.sidebar .brand{margin-top:58px}}
+@media(max-width:780px){.company-logo{position:absolute;left:auto;right:16px;top:9px;width:67px;padding:4px}.sidebar .brand{margin-top:0;min-height:43px;padding-right:76px}}
+:root{--bg:#101217;--sidebar:#15181e;--panel:#1b1f27;--line:#303640;--text:#eef1f6;--muted:#a0a9b8;--blue:#5794f2;--teal:#73bf69;--purple:#b494ee;--amber:#ffb357}
+body{background:var(--bg)}
+.sidebar{width:188px;padding:25px 16px;border-right-color:#282d36}
+.brand{padding:0 6px;margin-bottom:34px}.brand svg{color:#ffad56;width:29px;height:29px}
+.brand strong{font-size:16px}.brand strong span{font-size:12px;letter-spacing:1.8px;color:#a0a9b8}
+nav{gap:8px}nav a{border-radius:5px;font-size:14px;padding:12px;color:#acb4c1}
+nav a.active{background:#252d39;box-shadow:inset 3px 0 #ffad56}nav a.active svg{color:#ffad56}
+nav a:hover{background:#252a34}.sidebar-bottom{margin-top:auto;padding:32px 6px 0;line-height:1.7}.sidebar-label{color:#8993a4}
+.app-shell{margin-left:188px;max-width:none}
+.topbar{padding:22px 26px;min-height:100px;background:#15181e;border-bottom:1px solid var(--line);margin-bottom:22px}
+h1{font-size:24px;letter-spacing:-.7px;font-weight:600}.subtitle{font-size:13px;color:#9da7b8;margin-top:6px}
+.header-right{gap:18px}.connection{background:#21262e;border-color:#39414e;border-radius:4px;padding:8px 11px;font-size:13px}
+.connection:has(.live){background:#1b3027;border-color:#34533c;color:#9add92}.connection i.live{background:#73bf69}
+.clock strong{font-size:15px}.clock small{color:#9da7b8}.header-transport{color:#a0a9b8}
+main{padding:0 24px}.workspace{display:block}.main-column{min-width:0}
+.overline{min-height:34px;padding:8px 12px;background:#252b35;border:1px solid #343c49;border-radius:4px;margin-bottom:12px}
+.overline h2{font-size:13px;letter-spacing:1.4px;color:#e3e8ef}.overline>span{color:#aab5c6;font-size:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 2px 6px #00000016;padding:18px;min-width:0}
+.section-title{margin-bottom:16px;gap:10px}.section-title h2{font-size:14px;font-weight:600;letter-spacing:.2px}.section-title small{font-size:12px;color:#9da7b8}
+.tag{background:#242b35;border-color:#3a4555;color:#b7c7dc;border-radius:4px}
+.gauges{grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
+.gauge-card{position:relative;overflow:hidden;padding:16px 16px 13px;border-top:3px solid var(--accent)}
+.gauge-card.speed{--accent:#5794f2}.gauge-card.ina1{--accent:#73bf69}.gauge-card.ina2{--accent:#b494ee}.gauge-card.ina3{--accent:#55c4d2}.gauge-card.temperature{--accent:#ffb357}
+.gauge-title{text-align:left;color:#dce3ec;font-size:13px;letter-spacing:1px}.gauge-source{text-align:left;font-size:12px;color:#a0a9b8;min-height:0}
+.gauge{max-width:205px;margin:16px auto 0}.gauge-track{stroke:#303743;stroke-width:15}.gauge-fill{stroke-width:15;stroke-linecap:round}
+.gauge-reading strong{font:500 clamp(26px,2.6vw,40px)/1.2 Consolas,monospace;letter-spacing:-1px;color:#f5f7fa}
+.gauge-reading span{font-size:13px;color:#b0bac8}.gauge-range{color:#a0a9b8}.gauge-details{border-color:#323946;font-size:12px;margin-top:10px;padding-top:10px}.gauge-details b{font-size:14px}
+.status-strip{grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.rpm-card{background:linear-gradient(110deg,#203651,#1b2738);border-color:#35547a}.record-card{background:linear-gradient(110deg,#23382c,#1d2b24);border-color:#3d5442}
+.label{color:#d2dce9;font-size:12px;letter-spacing:1.3px}.inline-reading{margin:6px 0}.inline-reading>strong{font-size:32px;font-weight:500}.inline-reading>span{font-size:13px}.rpm-icon{stroke:#80b8ff;width:92px}
+.foot,.note{color:#a5afbd;line-height:1.7;font-size:12px}.pill{border-radius:4px;font-size:12px}.pill.on{background:#203b2c;color:#a0df91;border-color:#406348}
+.monitor-section,.sensor-grid,.attitude-grid,.device-panel,.sessions{margin-top:12px}
+.chart-panel{padding:18px}.chart-panel canvas{height:258px}.legend{font-size:13px;gap:14px}.axis-footer{color:#a0a9b8}.x{color:#5794f2}.y{color:#73bf69}.z{color:#b494ee}
+.sensor-grid{gap:12px;grid-template-columns:1.1fr 1fr}.sensor-grid>article{padding:18px}
+th{color:#a5b1c0;font-size:12px}td{border-color:#323844;padding:12px 4px}td:first-child{color:#96bffa}
+.temps{gap:14px 10px}.temps label{color:#aab4c2}.temps strong{font-size:23px;color:#ffce8d}.humidity{border-color:#323844}.humidity strong{color:#8ccee8}
+.attitude-grid{gap:12px}.angles{margin:12px 0 14px;gap:0;padding:10px 0;background:#151920;border:1px solid #303743;border-radius:5px}.angles strong{font-size:26px;line-height:1.5}.angles span{font-size:12px}.angles small{font-size:12px}
+.angles>div:nth-child(1) strong{color:#80b5ff}.angles>div:nth-child(2) strong{color:#9cda95}.angles>div:nth-child(3) strong{color:#c8b2f6}
+.imu-scene{background:radial-gradient(ellipse at center,#243244,#141a23 80%);border-color:#354253;border-radius:5px;margin:12px 0}.imu-scene canvas{height:240px}.imu-scene-label{font-size:12px;letter-spacing:.7px;color:#acbfd8}
+.imu-model-actions{gap:6px}.imu-model-actions button{font-size:12px;min-height:38px;white-space:normal}.accel-row{border-color:#343d49}
+.supply-panel .inline-reading{margin-top:12px}.supply-panel .inline-reading strong{color:#ffce8d;font-size:32px}
+.primary,.secondary{border-radius:4px;min-height:40px}.primary,.encoder-form>.secondary,#interval-apply{background:#386fc5;border-color:#528bea;color:#fff}.primary:hover:not(:disabled){background:#447fd9}
+.secondary{background:#282f3b;border-color:#414c5e}.secondary:hover:not(:disabled){background:#354155}.settings-panel input{background:#12171e;border-color:#3c4655;border-radius:4px;padding:9px 10px}
+.parameter-column{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:24px;align-items:start}
+.parameter-column>.overline{grid-column:1/-1;margin:0}.parameter-column .panel{height:100%}.encoder-form label{grid-template-columns:minmax(0,1fr) 105px}
+.device-controls{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.device-controls button{border-radius:4px;background:#232832;border-color:#3b4350;padding:11px;font-size:13px}.device-controls button[aria-pressed=true]{background:#23352a;border-color:#3c5943;color:#afe0a5}
+.file{border-color:#343c49}.file button{border-radius:4px}.file small{color:#a0a9b8}footer{padding:22px 0;color:#99a4b4}.alert{border-radius:4px}
+@media(min-width:1200px){
+ .main-column{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,1fr);grid-template-areas:"heading heading" "gauges gauges" "status status" "chart attitude" "sensors attitude" "devices devices" "logs logs";gap:12px;align-items:start}
+ .main-column>.overline{grid-area:heading;margin:0}.gauges{grid-area:gauges}.status-strip{grid-area:status;margin:0}.monitor-section{grid-area:chart;margin:0}.sensor-grid{grid-area:sensors;margin:0;grid-template-columns:1fr 1fr}.attitude-grid{grid-area:attitude;margin:0;grid-template-columns:1fr}.device-panel{grid-area:devices;margin:0}.sessions{grid-area:logs;margin:0}
+ .chart-panel canvas{height:235px}.attitude .note{margin-top:10px}.attitude-grid .supply-panel{padding:14px 18px}.supply-panel .section-title{margin-bottom:6px}
+}
+@media(min-width:1600px){.chart-panel canvas{height:280px}.imu-scene canvas{height:285px}.gauge{max-width:225px}.parameter-column{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:1199px){.sidebar{width:76px;padding:24px 12px}.brand{padding:0;justify-content:center}.brand strong,nav span,.sidebar-bottom{display:none}nav a{justify-content:center;padding:13px}.app-shell{margin-left:76px}.sensor-grid,.attitude-grid{grid-template-columns:1fr 1fr}.gauges{grid-template-columns:repeat(5,minmax(0,1fr))}.gauge-card{padding:12px 10px}.gauge-reading strong{font-size:26px}.header-transport{display:none}.parameter-column{grid-template-columns:repeat(2,minmax(0,1fr))}.device-controls{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:900px){.gauges{grid-template-columns:repeat(3,minmax(0,1fr))}.sensor-grid,.attitude-grid{grid-template-columns:1fr}.clock{display:none}.device-controls{grid-template-columns:repeat(3,minmax(0,1fr))}.gauge{max-width:190px}}
+@media(max-width:780px){.sidebar{position:relative;width:100%;padding:14px 16px 10px}.brand{justify-content:flex-start;margin:0 0 12px}.brand strong{display:block}.brand strong span{display:inline;margin-left:8px}.sidebar nav{flex-direction:row;gap:5px}.sidebar nav a{padding:9px 10px;justify-content:flex-start}.sidebar nav span{display:block}.app-shell{margin-left:0}.topbar{padding:18px 16px;margin-bottom:16px;min-height:84px}main{padding:0 14px}h1{font-size:21px}.subtitle{font-size:12px}.status-strip{grid-template-columns:1fr 1fr}.section-title{flex-wrap:wrap}.legend{width:auto}.parameter-column{grid-template-columns:1fr 1fr}.parameter-column>.overline{grid-column:1/-1}}
+@media(max-width:540px){.gauges{grid-template-columns:repeat(2,minmax(0,1fr))}.gauge-card:last-child{grid-column:1/-1}.gauge-card:last-child .gauge{max-width:180px}.gauge-reading strong{font-size:30px}.status-strip,.parameter-column{grid-template-columns:1fr}.panel{padding:15px}.device-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.connection{font-size:12px;padding:6px 8px}.header-right{min-width:0}.topbar{gap:8px}.subtitle{max-width:none}h1{font-size:19px}.overline>span{display:none}.imu-scene canvas{height:250px}}
