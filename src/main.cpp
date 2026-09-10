@@ -244,7 +244,7 @@ unsigned imuReadFailures = 0;
 float imuFilteredAccel[3] = {};
 bool imuFilterReady = false;
 uint32_t imuSampleUs = 0;
-float yawDeg = 0.0f, yawBias = 0.0f, yawSum = 0.0f, yawSumSq = 0.0f;
+float yawDeg = 0.0f, yawBias = 0.0f, yawSum = 0.0f;
 float previousYawRate = 0.0f;
 unsigned yawCalibrationCount = 0;
 uint32_t yawReference = 0;
@@ -254,7 +254,7 @@ void updateIMU();
 
 void calibrateYaw() {
   yawCalibrationCount = 0;
-  yawSum = yawSumSq = 0.0f;
+  yawSum = 0.0f;
   yawCalibrated = yawContinuous = false;
   yawDeg = 0.0f;
   imuSampleUs = 0;
@@ -931,30 +931,16 @@ void updateIMU() {
   const float ax = signed16(&imuSample[0]) / 4096.0f;
   const float ay = signed16(&imuSample[2]) / 4096.0f;
   const float az = signed16(&imuSample[4]) / 4096.0f;
-  const float gx = signed16(&imuSample[8]) / 32.8f;
-  const float gy = signed16(&imuSample[10]) / 32.8f;
   const float gz = signed16(&imuSample[12]) / 32.8f;
-  const float accelNorm = sqrtf(ax * ax + ay * ay + az * az);
-  const bool restingGravity = accelNorm > 0.95f && accelNorm < 1.05f;
 
   if (!yawCalibrated) {
-    // Reject obvious motion. Slow constant rotation cannot be distinguished
-    // from bias: the operator must keep the board still during calibration.
-    if (!restingGravity || fabsf(gx) > 5 || fabsf(gy) > 5 || fabsf(gz) > 5 || dt > 0.1f) {
-      yawCalibrationCount = 0;
-      yawSum = yawSumSq = 0;
-      return;
-    }
+    // Calibrate exactly once from the first 200 valid samples. Do not gate on
+    // the absolute gyro value: inexpensive modules can have more than 5 dps of
+    // zero-rate offset, which previously left calibration stuck at 0/200.
+    // The operator must keep the board still during this four-second window.
     yawSum += gz;
-    yawSumSq += gz * gz;
     if (++yawCalibrationCount >= 200) {
       const float mean = yawSum / yawCalibrationCount;
-      const float variance = yawSumSq / yawCalibrationCount - mean * mean;
-      if (variance > 0.25f) {
-        yawCalibrationCount = 0;
-        yawSum = yawSumSq = 0;
-        return;
-      }
       yawBias = mean;
       ++yawReference;
       yawDeg = 0;
@@ -968,10 +954,11 @@ void updateIMU() {
 
   const float rate = gz - yawBias;
   if (dt > 0.1f || abs(int(signed16(&imuSample[12]))) >= 32760) {
-    // Rotation during this interval is unknown. Start a NEW relative reference
-    // after stationary calibration rather than leaving yaw permanently invalid.
-    logLine("Yaw: sample gap / gyro clipping; reference lost, recalibrating");
-    calibrateYaw();
+    // Skip an interval whose rotation is unknown, but retain the one startup
+    // calibration and current relative yaw. Manual 'c' remains available when
+    // the user explicitly wants to establish a new gyro bias.
+    previousYawRate = rate;
+    logLine("Yaw: sample gap / gyro clipping; interval skipped");
     return;
   }
   if (yawContinuous && dt > 0) {

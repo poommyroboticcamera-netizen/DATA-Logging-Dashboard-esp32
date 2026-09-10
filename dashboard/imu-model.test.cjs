@@ -37,6 +37,8 @@ const pump=()=>{const pending=frames;frames=[];time+=60;pending.forEach(fn=>fn(t
 view.update(packet,false,'boot1');pump();assert.equal(paints,0,'OFF by default: no canvas work');assert.equal(frames.length,0);
 pause.onclick();pump();pump();assert.equal(reset.disabled,false);
 const original=JSON.stringify(packet);reset.onclick();restore.onclick();assert.equal(JSON.stringify(packet),original);
+view.update({...packet,yaw_valid:'0',yaw_deg:''},false,'boot1');pump();
+assert.equal(reset.disabled,false,'Roll/Pitch reference remains available before yaw is ready');
 pause.onclick();assert.equal(reset.disabled,true);const offPaints=paints;
 view.update({...packet,yaw_deg:'50'},false,'boot1');resize();pump();assert.equal(paints,offPaints);assert.equal(frames.length,0);
 pause.onclick();pump();assert.equal(reset.disabled,false);

@@ -46,7 +46,9 @@ const ImuModel = (() => {
     const colors = ['#2f70ff','#23bce7','#153d9b','#166984','#1c315c','#275285'];
     function note() {
       status.textContent = paused ? 'ปิดโมเดล 3D · ค่าเซนเซอร์และการบันทึกยังทำงาน' : !valid ? (hasPose ? 'พักภาพล่าสุด · รอค่า IMU / มุมเอียงที่ใช้ได้' : 'รอค่า IMU') : full ? 'มุมจาก IMU · ภาพประมาณจาก Roll / Pitch / Yaw' : 'แสดงเฉพาะ Roll / Pitch · ยังไม่มีค่า Yaw';
-      reset.disabled = !valid || !full || paused;
+      // A visual reference is useful for Roll/Pitch as well; do not keep this
+      // control disabled merely because startup yaw calibration is incomplete.
+      reset.disabled = !valid || paused;
       restore.disabled = paused;
     }
     function draw() {
@@ -104,7 +106,7 @@ const ImuModel = (() => {
       note();wake();
       expiry=setTimeout(()=>{if(performance.now()-receivedAt>=2400){valid=false;note();draw();}},2500);
     }
-    reset.onclick=()=>{if(valid&&full){reference=target.slice();shown=target.slice();draw();}};
+    reset.onclick=()=>{if(valid){reference=target.slice();shown=target.slice();draw();}};
     restore.onclick=()=>{reference=identity();draw();};
     pause.onclick=()=>{
       paused=!paused;
