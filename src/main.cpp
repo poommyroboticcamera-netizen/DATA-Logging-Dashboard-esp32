@@ -19,6 +19,7 @@
 #include "wifi_config.h"
 #include "runtime_config.h"
 #include "dashboard_page.h"
+#include "can/CanService.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -30,6 +31,7 @@ std::atomic<bool> supplyBusEnabled{false};
 std::atomic<uint32_t> supplyGeneration{0};
 SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t stateMutex = nullptr;
+SemaphoreHandle_t storageMutex = nullptr; // Shared ownership of the one SPI/SD device.
 QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr;
 QueueHandle_t sensorCommands = nullptr, logQueue = nullptr;
 
@@ -1389,7 +1391,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260909-ds-separate-ga-hz-1";
+constexpr const char *FIRMWARE_BUILD = "20260910-passive-can-tabs-1";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1535,6 +1537,7 @@ void logCaptureTask(void *) {
       previousToken = token; interval = requested; lastCapture = now;
     }
     if (!(token & 1) || uint32_t(now - lastCapture) < interval) continue;
+    if (canservice::active()) { lastCapture=now; continue; } // CAN CSV owns storage in CAN mode.
     lastCapture += (uint32_t(now - lastCapture) / interval) * interval;
     LogRecord record;
     record.recordingSession = token >> 1;
@@ -1877,6 +1880,9 @@ void sdWriterTask(void *) {
     LogRecord record;
     if (xQueueReceive(sdRecords, &record, pdMS_TO_TICKS(200)) != pdTRUE) continue;
     if (!deviceEnabled(DEV_SD)) continue;
+    if (canservice::active()) { sdDropped.fetch_add(1); continue; }
+    Lock storage(storageMutex,pdMS_TO_TICKS(20));
+    if(!storage || canservice::active()) { sdDropped.fetch_add(1);continue; }
     if (record.recordingSession != activeRecordingSession) {
       activeRecordingSession = record.recordingSession;
       mounted = false; sdMounted.store(false); nextAttempt = 0;
@@ -1940,6 +1946,30 @@ void wifiTask(void *) {
   WebServer server(80);
   const char *requestHeaders[] = {"X-Dashboard-Request"};
   server.collectHeaders(requestHeaders, 1);
+  static char canResponse[6144]; // One HTTP owner, reused for JSON and text responses.
+  server.on("/api/can",HTTP_GET,[&]() {
+    if(!canservice::statusJson(canResponse,sizeof(canResponse))) { server.send(503,"text/plain","CAN snapshot busy/unavailable");return; }
+    server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",canResponse);
+  });
+  server.on("/api/can/report",HTTP_GET,[&]() {
+    if(!canservice::reportText(canResponse,sizeof(canResponse))) { server.send(503,"text/plain","Report busy");return; }
+    server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain; charset=utf-8",canResponse);
+  });
+  server.on("/api/can/mode",HTTP_POST,[&]() {
+    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
+    String mode=server.arg("mode");
+    if(mode!="can" && mode!="dashboard" && mode!="encoder" && mode!="imu") { server.send(400,"text/plain","Invalid mode");return; }
+    if(mode=="can" && !ENABLE_SD_LOGGING) { server.send(409,"text/plain","SD logging disabled in firmware");return; }
+    if(!canservice::setMode(mode=="can")) { server.send(503,"text/plain","CAN queue unavailable; retry");return; }
+    server.send(202,"application/json","{\"queued\":true}");
+  });
+  server.on("/api/can/command",HTTP_POST,[&]() {
+    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
+    const String text=server.arg("command");
+    if(!text.length() || text.length()>79) { server.send(400,"text/plain","Command length 1..79");return; }
+    if(!canservice::command(text.c_str())) { server.send(503,"text/plain","CAN command queue full; retry");return; }
+    server.send(202,"application/json","{\"queued\":true}");
+  });
   server.on("/api/health", HTTP_GET, [&]() {
     String json; json.reserve(900);
     json = "{\"reset_reason\":\"";
@@ -2156,7 +2186,7 @@ void wifiTask(void *) {
     const EncoderConfig config = getEncoderConfig();
     const ShuntConfig shunts = getShuntConfig();
     const uint32_t token = recordingToken.load();
-    json += ",\"recording\":" + String((token & 1) ? "true" : "false");
+    json += ",\"recording\":" + String((token & 1) && !canservice::active() ? "true" : "false");
     json += ",\"recording_session\":" + String(token >> 1);
     json += ",\"ds_pins\":[27,16,13,14],\"ds_rom\":" + dsMapJson();
     json += ",\"ga_step_ms\":" + String(gaStepMs.load());
@@ -2205,6 +2235,7 @@ void consoleTask(void *) {
   bool streaming = false;
   String lastWebIp;
   for (;;) {
+    canservice::pollConsole(SERIAL_IP_ONLY);
     if (SERIAL_IP_ONLY) {
       // Print once per connection/IP change; sensor data stays on the web.
       if (WiFi.status() == WL_CONNECTED) {
@@ -2217,11 +2248,15 @@ void consoleTask(void *) {
         lastWebIp = "";
       }
       // Ignore legacy telemetry commands in IP-only mode.
-      for (unsigned i = 0; i < 64 && Serial.available(); ++i) Serial.read();
+      for (unsigned i = 0; i < 64 && Serial.available(); ++i) {
+        int c=Serial.peek();if(c==':' || (c>='A' && c<='Z' && strchr("SIBECRLH",c)))break;
+        Serial.read();
+      }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     for (unsigned i = 0; i < 16 && Serial.available(); i++) {
+      if(Serial.peek()==':' || canservice::serialPending()) { canservice::pollConsole(false);break; }
       const char command = char(Serial.read());
       if (command == 'j' || command == 'J') {
         streaming = true;
@@ -2300,11 +2335,12 @@ void setup() {
 
   i2cMutex = xSemaphoreCreateMutex();
   stateMutex = xSemaphoreCreateMutex();
+  storageMutex = xSemaphoreCreateMutex();
   imuCommands = xQueueCreate(8, sizeof(char));
   mcpCommands = xQueueCreate(8, sizeof(char));
   sensorCommands = xQueueCreate(8, sizeof(char));
   logQueue = xQueueCreate(32, sizeof(LogMessage));
-  if (!i2cMutex || !stateMutex || !imuCommands || !mcpCommands ||
+  if (!i2cMutex || !stateMutex || !storageMutex || !imuCommands || !mcpCommands ||
       !sensorCommands || !logQueue) {
     Serial.println("FATAL: RTOS allocation failed; reset board");
     while (true) delay(1000);
@@ -2328,6 +2364,7 @@ void setup() {
     while (true) delay(1000);
   }
   TaskHandle_t handles[12] = {};
+  if(!canservice::begin(storageMutex)) { Serial.println("FATAL: passive CAN initialization failed");while(true)delay(1000); }
   bool ok = true;
   if (SUPPLY_MONITOR_ENABLED)
     ok = xTaskCreatePinnedToCore(supplyTask, "supply", 3072, nullptr, 4, &handles[4], SENSOR_CORE) == pdPASS;

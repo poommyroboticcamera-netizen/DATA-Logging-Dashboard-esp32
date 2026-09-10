@@ -48,6 +48,14 @@ The demo is rebuilt from the same HTML, CSS, and JavaScript embedded in the firm
 | Output control | MCP23017 GA0–GA3 manual control and chase sequence | 2 Hz chase |
 | Runtime | FreeRTOS tasks split across both ESP32 cores | Sensors on Core 1, web on Core 0 |
 
+## Passive CAN and compact sensor tabs
+
+The dashboard now includes **CAN + CSV**, **Encoder**, and **IMU** tabs. Entering CAN automatically starts a separate raw CAN CSV on SD; leaving it drains and closes that file. CAN remains listen-only, with no frame-transmit API or active-mode switch in the dashboard firmware. The Encoder/IMU tabs reuse existing sensor drivers and show compact numeric values at 1 Hz.
+
+Verify **CAN TX GPIO25 / RX GPIO26 / 500 kbit/s** in `src/can/Config.h` before wiring. I2C remains on GPIO21/22. The in-memory analyzer holds 16 traffic keys; independent SD capture includes untracked IDs subject to queue capacity. Standard/extended IDs, byte statistics, candidate fields/counters/checksums, and baseline/action comparison are available. Findings are candidates, not vehicle signal definitions.
+
+See [architecture, algorithms, RAM budget, commands and bench/vehicle procedures](docs/can-analysis.md) and [validation results](docs/can-validation.md). The separate bench transmitter under `examples/` must never be connected to a vehicle.
+
 ## Features
 
 | Real-time telemetry | Reliable recording | Runtime control |

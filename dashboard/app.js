@@ -89,6 +89,7 @@
     $('scale-' + key).textContent = scale.max;
   }
   function render(data, supply, stale = false) {
+    window.dispatchEvent(new CustomEvent('dashboard-sample', {detail:{data,stale}}));
     imuModel.update(data, stale, deviceState.boot);
     const n = key => stale ? null : C.number(data, key);
     const valid = key => !stale && data?.[key] === '1';
@@ -137,6 +138,7 @@
     $('humidity').textContent = fmt(valid('dht22_valid') ? n('dht22_humidity_pct') : null, 1) + ' %RH';
   }
   function graph() {
+    if (window.DashboardModes?.current() !== 'dashboard' || document.hidden) return;
     const canvas = $('chart'), rect = canvas.getBoundingClientRect(), dpr = devicePixelRatio || 1;
     canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
     const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
@@ -385,7 +387,7 @@
     // One outstanding request; slow down for long recording intervals.
     async function pollNext() {
       await poll();
-      setTimeout(pollNext, Math.min(250, Math.max(100, currentInterval / 2)));
+      setTimeout(pollNext, document.hidden ? 2000 : window.DashboardModes?.interval() || 250);
     }
     pollNext();
   }

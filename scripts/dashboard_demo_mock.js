@@ -163,11 +163,16 @@
     };
   }
 
+  let canMode=false;
   async function mockApi(path, init) {
     await new Promise(resolve => setTimeout(resolve, 25));
     if (path === '/api/state') return json(statePacket());
 
     const form = formValues(init);
+    if(path==='/api/can/mode') {canMode=form.get('mode')==='can';return json({queued:true});}
+    if(path==='/api/can/command')return json({queued:true});
+    if(path==='/api/can/report')return new Response('UI preview only. No CAN hardware, frames, or SD file is present.',{headers:{'Content-Type':'text/plain'}});
+    if(path==='/api/can')return json({mode:'LISTEN_ONLY',active:canMode,acquiring:true,bitrate:500000,tx_gpio:25,rx_gpio:26,capacity:16,log:false,log_state:'DEMO_ONLY',file:'',frames:0,analysis_drops:0,log_drops:0,write_errors:0,db_full:0,driver_missed:0,driver_overruns:0,bus_errors:0,rows:0,phase:0,remaining_s:0,baseline_ready:false,action_ready:false,free_heap:0,min_heap:0,rx_queue_peak:0,log_queue_peak:0,ids:[],candidates:[],experiment:'',report_revision:0,demo:true});
     if (path === '/api/device') {
       const bit = deviceIds.indexOf(form.get('device'));
       if (bit < 0) return json({ error: 'Unknown demo device' }, 400);
