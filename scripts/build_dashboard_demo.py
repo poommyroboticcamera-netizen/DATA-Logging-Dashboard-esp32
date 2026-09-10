@@ -20,7 +20,6 @@ def build(output: Path) -> None:
     html = replace_once(html, "/*__STYLE__*/", (UI / "style.css").read_text(encoding="utf-8"))
     html = replace_once(html, "/*__CORE__*/", (UI / "core.js").read_text(encoding="utf-8"))
     html = replace_once(html, "/*__MODEL__*/", (UI / "imu-model.js").read_text(encoding="utf-8"))
-    html = replace_once(html, "/*__CAN__*/", (UI / "can.js").read_text(encoding="utf-8"))
     demo_app = MOCK_API.read_text(encoding="utf-8") + "\n" + (UI / "app.js").read_text(encoding="utf-8")
     html = replace_once(html, "/*__APP__*/", demo_app)
     html = html.replace(

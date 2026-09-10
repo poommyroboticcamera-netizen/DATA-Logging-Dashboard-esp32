@@ -24,7 +24,7 @@
 
 This project turns an ESP32 into a compact telemetry hub for electrical, environmental, motion, and speed measurements. The firmware samples sensors in dedicated FreeRTOS tasks, publishes a responsive dashboard over the local Wi-Fi network, and records structured CSV data for later analysis in Excel or another data tool.
 
-The dashboard is compiled into the firmware, so no separate filesystem upload is required. Live charts, controls, and the optional IMU orientation model run in the browser to keep the ESP32 workload predictable. The ESP32 also exposes a direct fallback network named `ESP32-Dashboard`; connect with password `esp32dash` and open `http://192.168.4.1/` when the existing router or hotspot prevents devices from reaching each other.
+The dashboard is compiled into the firmware, so no separate filesystem upload is required. Live charts, controls, and the optional IMU orientation model run in the browser to keep the ESP32 workload predictable.
 
 > [!IMPORTANT]
 > This repository is an engineering prototype. Software checks are included, but measurement accuracy, electrical safety, and long-duration stability must still be validated on the target PCB.
@@ -46,16 +46,7 @@ The demo is rebuilt from the same HTML, CSS, and JavaScript embedded in the firm
 | Motion | MPU6050 or MPU6500 acceleration, roll, pitch, and yaw | Approx. 50 Hz |
 | Speed | Quadrature encoder, shaft RPM, wheel RPM, and km/h | 360 P/R, 100 mm wheel |
 | Output control | MCP23017 GA0–GA3 manual control and chase sequence | 2 Hz chase |
-| CAN analysis | Passive TWAI traffic discovery and raw SD CSV | Disabled at boot, 500 kbit/s |
 | Runtime | FreeRTOS tasks split across both ESP32 cores | Sensors on Core 1, web on Core 0 |
-
-## Dashboard and passive CAN modes
-
-The interface has two main functions. **Dashboard** keeps the original live sensors, Encoder, IMU, controls, settings, graphs, and sensor logging. **CAN Analyzer** is an exclusive workspace: entering it pauses INA226, RTC, IMU, MCP23017, DHT22, DS18B20, Encoder, the sensor logger, and its debug LED while keeping Wi-Fi, the web server, and SD access available for CAN capture. Returning to Dashboard disables CAN, drains and closes an active raw CAN file, and restores the saved Dashboard device configuration.
-
-CAN is disabled at boot and remains disabled when the CAN page first opens. The operator can select **50, 100, 125, 250, 500, or 1000 kbit/s** while CAN is off; the choice is saved in ESP32 preferences. Once enabled, TWAI runs in listen-only mode with no frame-transmit API. Verify **CAN TX GPIO25 / RX GPIO26**, the chosen bitrate, and the transceiver before wiring. I2C remains on GPIO21/22. The in-memory analyzer holds 16 traffic keys; independent SD capture includes untracked IDs subject to queue capacity. Standard/extended IDs, byte statistics, candidate fields/counters/checksums, and baseline/action comparison are available. Findings are candidates, not vehicle signal definitions.
-
-See [architecture, algorithms, RAM budget, commands and bench/vehicle procedures](docs/can-analysis.md) and [validation results](docs/can-validation.md). The separate bench transmitter under `examples/` must never be connected to a vehicle.
 
 ## Features
 

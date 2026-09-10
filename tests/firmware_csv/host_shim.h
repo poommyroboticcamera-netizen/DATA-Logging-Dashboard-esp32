@@ -31,4 +31,3 @@ public:
 class Lock { public: explicit Lock(int) {} };
 constexpr int stateMutex = 0;
 std::atomic<bool> supplyBusEnabled{true};
-namespace canservice { bool active() { return false; } }

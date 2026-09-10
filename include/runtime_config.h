@@ -8,10 +8,5 @@ constexpr uint32_t SWITCH_DEBOUNCE_MS = 40;
 constexpr BaseType_t WEB_CORE = 0;
 constexpr BaseType_t SENSOR_CORE = 1;
 
-// Direct dashboard access remains available when the existing router/hotspot
-// isolates Wi-Fi clients. The ESP32 keeps its normal station connection too.
-constexpr const char *DASHBOARD_AP_SSID = "ESP32-Dashboard";
-constexpr const char *DASHBOARD_AP_PASSWORD = "esp32dash"; // At least 8 characters.
-
 // SD card installed. This firmware requires a FAT16/FAT32 filesystem.
 constexpr bool ENABLE_SD_LOGGING = true;

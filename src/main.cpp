@@ -19,7 +19,6 @@
 #include "wifi_config.h"
 #include "runtime_config.h"
 #include "dashboard_page.h"
-#include "can/CanService.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -31,7 +30,6 @@ std::atomic<bool> supplyBusEnabled{false};
 std::atomic<uint32_t> supplyGeneration{0};
 SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t stateMutex = nullptr;
-SemaphoreHandle_t storageMutex = nullptr; // Shared ownership of the one SPI/SD device.
 QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr;
 QueueHandle_t sensorCommands = nullptr, logQueue = nullptr;
 
@@ -157,11 +155,7 @@ const char *const deviceNames[] = {"ina1", "ina2", "ina3", "rtc", "imu", "mcp",
 constexpr uint32_t ALL_DEVICES_MASK = (1U << DEVICE_COUNT) - 1;
 std::atomic<uint32_t> enabledDevices{ALL_DEVICES_MASK};
 uint32_t deviceControlRevision = 0; // Wi-Fi task owns revision and switch writes.
-bool deviceEnabled(unsigned id) {
-  const bool configured=enabledDevices.load() & (1U << id);
-  // CAN mode is exclusive: keep only SD available for raw CAN logging.
-  return configured && (id==DEV_SD || !canservice::active());
-}
+bool deviceEnabled(unsigned id) { return enabledDevices.load() & (1U << id); }
 struct EncoderConfig { float ppr = 360, wheelMm = 100, ratio = 1; };
 EncoderConfig encoderConfig; // Protected by stateMutex after setup.
 struct ShuntConfig { float mohm[3] = {1.0f, 1.0f, 1.0f}; };
@@ -1262,7 +1256,7 @@ void sampleSupply() {
 void supplyTask(void *) {
   TickType_t wake = xTaskGetTickCount();
   for (;;) {
-    if(!canservice::active())sampleSupply();
+    sampleSupply();
     waitPeriod(wake, 50);
   }
 }
@@ -1395,7 +1389,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260910-dashboard-can-ap-fallback-3";
+constexpr const char *FIRMWARE_BUILD = "20260909-ds-separate-ga-hz-1";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1541,7 +1535,6 @@ void logCaptureTask(void *) {
       previousToken = token; interval = requested; lastCapture = now;
     }
     if (!(token & 1) || uint32_t(now - lastCapture) < interval) continue;
-    if (canservice::active()) { lastCapture=now; continue; } // CAN CSV owns storage in CAN mode.
     lastCapture += (uint32_t(now - lastCapture) / interval) * interval;
     LogRecord record;
     record.recordingSession = token >> 1;
@@ -1594,7 +1587,7 @@ void recordingControlTask(void *) {
     const bool starting = (token & 1) && !(recordingToken.load() & 1);
     recordingToken.store(token);
     const uint32_t period = debugBlinkMs.load();
-    if (canservice::active() || !(token & 1)) {
+    if (!(token & 1)) {
       if (led) digitalWrite(DEBUG_LED_PIN, DEBUG_LED_OFF);
       led = false; ledChanged = now;
     } else if (starting || period != priorPeriod || uint32_t(now - ledChanged) >= period / 2) {
@@ -1884,9 +1877,6 @@ void sdWriterTask(void *) {
     LogRecord record;
     if (xQueueReceive(sdRecords, &record, pdMS_TO_TICKS(200)) != pdTRUE) continue;
     if (!deviceEnabled(DEV_SD)) continue;
-    if (canservice::active()) { sdDropped.fetch_add(1); continue; }
-    Lock storage(storageMutex,pdMS_TO_TICKS(20));
-    if(!storage || canservice::active()) { sdDropped.fetch_add(1);continue; }
     if (record.recordingSession != activeRecordingSession) {
       activeRecordingSession = record.recordingSession;
       mounted = false; sdMounted.store(false); nextAttempt = 0;
@@ -1943,53 +1933,13 @@ void sdWriterTask(void *) {
 
 // The Wi-Fi server owns network IO. It never reads I2C directly.
 void wifiTask(void *) {
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
-  const bool directApReady=WiFi.softAP(DASHBOARD_AP_SSID,DASHBOARD_AP_PASSWORD);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WebServer server(80);
   const char *requestHeaders[] = {"X-Dashboard-Request"};
   server.collectHeaders(requestHeaders, 1);
-  static char canResponse[6144]; // One HTTP owner, reused for JSON and text responses.
-  server.on("/api/can",HTTP_GET,[&]() {
-    if(!canservice::statusJson(canResponse,sizeof(canResponse))) { server.send(503,"text/plain","CAN snapshot busy/unavailable");return; }
-    server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",canResponse);
-  });
-  server.on("/api/can/report",HTTP_GET,[&]() {
-    if(!canservice::reportText(canResponse,sizeof(canResponse))) { server.send(503,"text/plain","Report busy");return; }
-    server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain; charset=utf-8",canResponse);
-  });
-  server.on("/api/can/mode",HTTP_POST,[&]() {
-    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
-    String mode=server.arg("mode");
-    if(mode!="can" && mode!="dashboard") { server.send(400,"text/plain","Invalid mode");return; }
-    if(!canservice::setMode(mode=="can")) { server.send(503,"text/plain","CAN queue unavailable; retry");return; }
-    server.send(202,"application/json","{\"queued\":true}");
-  });
-  server.on("/api/can/control",HTTP_POST,[&]() {
-    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
-    const String value=server.arg("enabled");
-    if(value!="0" && value!="1") { server.send(400,"text/plain","enabled must be 0 or 1");return; }
-    if(value=="1" && !canservice::active()) { server.send(409,"text/plain","Enter CAN mode before enabling CAN");return; }
-    if(!canservice::setEnabled(value=="1")) { server.send(503,"text/plain","CAN control unavailable; retry");return; }
-    server.send(202,"application/json",String("{\"requested_enabled\":")+(value=="1"?"true":"false")+"}");
-  });
-  server.on("/api/can/bitrate",HTTP_POST,[&]() {
-    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
-    const String raw=server.arg("bitrate");bool digits=raw.length()>0 && raw.length()<=7;
-    for(unsigned i=0;i<raw.length();++i)digits &= raw[i]>='0' && raw[i]<='9';
-    const uint32_t value=digits ? raw.toInt() : 0;
-    if(!canservice::setBitrate(value)) { server.send(409,"text/plain","Disable CAN and select 50, 100, 125, 250, 500 or 1000 kbit/s");return; }
-    server.send(200,"application/json",String("{\"bitrate\":")+canservice::bitrate()+"}");
-  });
-  server.on("/api/can/command",HTTP_POST,[&]() {
-    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
-    const String text=server.arg("command");
-    if(!text.length() || text.length()>79) { server.send(400,"text/plain","Command length 1..79");return; }
-    if(!canservice::command(text.c_str())) { server.send(503,"text/plain","CAN command queue full; retry");return; }
-    server.send(202,"application/json","{\"queued\":true}");
-  });
   server.on("/api/health", HTTP_GET, [&]() {
     String json; json.reserve(900);
     json = "{\"reset_reason\":\"";
@@ -2000,7 +1950,7 @@ void wifiTask(void *) {
     json += ",\"largest_free_block_bytes\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     const uint32_t token = recordingToken.load();
     json += ",\"firmware\":\"" + String(FIRMWARE_BUILD) + "\"";
-    json += ",\"recording\":" + String((token & 1) && !canservice::active() ? "true" : "false");
+    json += ",\"recording\":" + String(token & 1 ? "true" : "false");
     json += ",\"recording_session\":" + String(token >> 1);
     json += ",\"sw1_gpio\":" + String(RECORD_START_PIN);
     json += ",\"sw2_gpio\":" + String(RECORD_STOP_PIN);
@@ -2206,7 +2156,7 @@ void wifiTask(void *) {
     const EncoderConfig config = getEncoderConfig();
     const ShuntConfig shunts = getShuntConfig();
     const uint32_t token = recordingToken.load();
-    json += ",\"recording\":" + String((token & 1) && !canservice::active() ? "true" : "false");
+    json += ",\"recording\":" + String((token & 1) ? "true" : "false");
     json += ",\"recording_session\":" + String(token >> 1);
     json += ",\"ds_pins\":[27,16,13,14],\"ds_rom\":" + dsMapJson();
     json += ",\"ga_step_ms\":" + String(gaStepMs.load());
@@ -2227,27 +2177,22 @@ void wifiTask(void *) {
     server.send(200, "application/json", json);
   });
   server.onNotFound([&]() { server.send(404, "text/plain", "Not found"); });
-  // Listen on both interfaces. The direct AP stays usable even if the router
-  // disconnects the station or prevents clients from reaching each other.
-  server.begin();
-  if(directApReady)logf("Dashboard direct: Wi-Fi %s, http://%s/\n",DASHBOARD_AP_SSID,WiFi.softAPIP().toString().c_str());
-  else logLine("Dashboard direct Wi-Fi failed to start");
+  bool started = false;
   uint32_t lastRetry = millis();
-  bool stationAnnounced=false;
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
-      if(!stationAnnounced) {
+      if (!started) {
+        server.begin(); started = true;
         logf("Wi-Fi dashboard: http://%s (same Wi-Fi network)\n", WiFi.localIP().toString().c_str());
-        stationAnnounced=true;
       }
+      server.handleClient();
     } else {
-      stationAnnounced=false;
+      if (started) { server.stop(); started = false; }
       if (millis() - lastRetry >= 15000) {
         logLine("Wi-Fi: waiting for 2.4 GHz network; reconnecting");
         WiFi.reconnect(); lastRetry = millis();
       }
     }
-    server.handleClient();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -2259,16 +2204,9 @@ void consoleTask(void *) {
   uint32_t telemetrySequence = 0;
   bool streaming = false;
   String lastWebIp;
-  bool directUrlPrinted=false;
   for (;;) {
-    canservice::pollConsole(SERIAL_IP_ONLY);
     if (SERIAL_IP_ONLY) {
       // Print once per connection/IP change; sensor data stays on the web.
-      if(!directUrlPrinted && WiFi.softAPIP()!=IPAddress(0,0,0,0)) {
-        Serial.printf("Direct dashboard: connect Wi-Fi %s (password %s), then open http://%s/\n",
-          DASHBOARD_AP_SSID,DASHBOARD_AP_PASSWORD,WiFi.softAPIP().toString().c_str());
-        directUrlPrinted=true;
-      }
       if (WiFi.status() == WL_CONNECTED) {
         const String ip = WiFi.localIP().toString();
         if (ip != "0.0.0.0" && ip != lastWebIp) {
@@ -2279,15 +2217,11 @@ void consoleTask(void *) {
         lastWebIp = "";
       }
       // Ignore legacy telemetry commands in IP-only mode.
-      for (unsigned i = 0; i < 64 && Serial.available(); ++i) {
-        int c=Serial.peek();if(c==':' || (c>='A' && c<='Z' && strchr("SIBECRLH",c)))break;
-        Serial.read();
-      }
+      for (unsigned i = 0; i < 64 && Serial.available(); ++i) Serial.read();
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     for (unsigned i = 0; i < 16 && Serial.available(); i++) {
-      if(Serial.peek()==':' || canservice::serialPending()) { canservice::pollConsole(false);break; }
       const char command = char(Serial.read());
       if (command == 'j' || command == 'J') {
         streaming = true;
@@ -2366,12 +2300,11 @@ void setup() {
 
   i2cMutex = xSemaphoreCreateMutex();
   stateMutex = xSemaphoreCreateMutex();
-  storageMutex = xSemaphoreCreateMutex();
   imuCommands = xQueueCreate(8, sizeof(char));
   mcpCommands = xQueueCreate(8, sizeof(char));
   sensorCommands = xQueueCreate(8, sizeof(char));
   logQueue = xQueueCreate(32, sizeof(LogMessage));
-  if (!i2cMutex || !stateMutex || !storageMutex || !imuCommands || !mcpCommands ||
+  if (!i2cMutex || !stateMutex || !imuCommands || !mcpCommands ||
       !sensorCommands || !logQueue) {
     Serial.println("FATAL: RTOS allocation failed; reset board");
     while (true) delay(1000);
@@ -2395,7 +2328,6 @@ void setup() {
     while (true) delay(1000);
   }
   TaskHandle_t handles[12] = {};
-  if(!canservice::begin(storageMutex)) { Serial.println("FATAL: passive CAN initialization failed");while(true)delay(1000); }
   bool ok = true;
   if (SUPPLY_MONITOR_ENABLED)
     ok = xTaskCreatePinnedToCore(supplyTask, "supply", 3072, nullptr, 4, &handles[4], SENSOR_CORE) == pdPASS;

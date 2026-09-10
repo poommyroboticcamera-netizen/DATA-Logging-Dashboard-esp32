@@ -26,33 +26,3 @@ main{padding:0 26px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 
 .imu-scene{position:relative;overflow:hidden;border:1px solid #283c56;border-radius:10px;background:radial-gradient(ellipse at 50% 45%,#162a44 0%,#0a1321 75%);margin:16px 0 12px}.imu-scene canvas{display:block;width:100%;height:300px}.imu-scene-label{position:absolute;top:12px;left:14px;color:#8ca5c3;font:10px monospace;letter-spacing:1.2px;pointer-events:none}.imu-model-actions{display:flex;gap:8px;flex-wrap:wrap}.imu-model-actions button{width:auto;flex:1;font-size:12px;padding:8px;white-space:nowrap}.imu-model-actions button[aria-pressed=true]{border-color:#53dec0;color:#53dec0}@media(max-width:540px){.imu-scene canvas{height:250px}}
 
 .imu-scene-off canvas{visibility:hidden}.imu-scene-off::after{content:"3D ปิดอยู่ · กดเปิดเมื่อต้องการดูโมเดล";position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;color:#92a4b8;font-size:13px}
-/* The exclusive CAN workspace reuses the dashboard palette. */
-.workspace[hidden],.mode-panel[hidden]{display:none!important}
-.mode-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
-.mode-tabs button{padding:11px 22px;background:#101b2b;border:1px solid #28374d;border-radius:10px;color:#a7b8cf;font:inherit;cursor:pointer}
-.mode-tabs button.selected{background:#174483;color:#fff;border-color:#4286f4}
-.mode-tabs button:disabled{opacity:.55}
-.mode-panel{display:grid;gap:18px;margin-bottom:24px}
-.mode-error{color:#ff9898!important}
-.can-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;padding:20px 0}
-.can-metrics>div{display:flex;flex-direction:column;gap:10px}
-.can-metrics strong{font-size:32px;font-variant-numeric:tabular-nums;color:#e4edff}
-.can-metrics small{color:#99abc2}
-.can-actions{display:flex;align-items:end;flex-wrap:wrap;gap:10px;margin:16px 0}
-.can-actions label{display:flex;flex-direction:column;gap:6px;color:#aebed3;font-size:13px}
-.can-actions .secondary,.can-actions .primary{width:auto;flex:0 1 auto}
-.can-actions input{max-width:180px;padding:10px;border:1px solid #304058;border-radius:8px;background:#0a1423;color:#eef4ff}
-.can-mode-banner{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0;padding:12px 14px;border:1px solid #78531e;border-radius:9px;background:#2b2012;color:#e8bd75}
-.can-mode-banner span{color:#cdbb9a;font-size:13px}
-.can-config{display:flex;align-items:end;gap:10px;flex-wrap:wrap;padding:14px 0;border-bottom:1px solid #26364c}
-.can-config label{display:flex;flex-direction:column;gap:6px;color:#aebed3;font-size:13px}
-.can-config select{min-width:150px;padding:10px;border:1px solid #304058;border-radius:8px;background:#0a1423;color:#eef4ff}
-.can-config .primary,.can-config .secondary{width:auto;margin:0}
-.can-config .pill{margin-left:auto}
-.can-log-line{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
-.can-table-wrap{overflow-x:auto}.can-table-wrap table{min-width:720px}
-.can-table-wrap td:nth-child(6){font-family:monospace;white-space:nowrap}
-.can-table-wrap button{white-space:nowrap;font-size:12px;padding:6px 10px}
-.candidate-list{line-height:1.9;font-family:monospace;color:#c3d4ec;padding-left:24px}
-.can-report{max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;color:#b5c9e4;background:#091321;border-radius:8px;padding:16px}
-@media(max-width:650px){.can-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.mode-tabs button{padding:10px 14px}.can-metrics strong{font-size:27px}}
