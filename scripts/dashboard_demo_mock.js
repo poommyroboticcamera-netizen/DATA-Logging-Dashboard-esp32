@@ -33,10 +33,13 @@
   let gaStepMs = 500;
   let shuntMohm = [1, 1, 1];
   let encoder = { ppr: 360, wheel_mm: 100, ratio: 1 };
+  let canMode = false;
+  let canEnabled = false;
+  let canBitrate = 500000;
 
   const enabled = id => {
     const bit = deviceIds.indexOf(id);
-    return bit >= 0 && (devicesMask & (1 << bit)) !== 0;
+    return bit >= 0 && (devicesMask & (1 << bit)) !== 0 && (!canMode || id === 'sd');
   };
   const f = (value, digits = 4) => Number(value).toFixed(digits);
   const pad = value => String(value).padStart(2, '0');
@@ -142,7 +145,7 @@
       csv: header.map(key => values[key] ?? '').join(','),
       devices_mask: devicesMask,
       control_revision: revision,
-      recording: true,
+      recording: !canMode,
       recording_session: 1,
       blink_ms: blinkMs,
       shunt_mohm: shuntMohm,
@@ -163,16 +166,17 @@
     };
   }
 
-  let canMode=false;
   async function mockApi(path, init) {
     await new Promise(resolve => setTimeout(resolve, 25));
     if (path === '/api/state') return json(statePacket());
 
     const form = formValues(init);
-    if(path==='/api/can/mode') {canMode=form.get('mode')==='can';return json({queued:true});}
+    if(path==='/api/can/mode') {canMode=form.get('mode')==='can';if(!canMode)canEnabled=false;return json({queued:true});}
+    if(path==='/api/can/control') {if(!canMode&&form.get('enabled')==='1')return json({error:'Enter CAN mode first'},409);canEnabled=form.get('enabled')==='1';return json({requested_enabled:canEnabled});}
+    if(path==='/api/can/bitrate') {const value=Number(form.get('bitrate'));if(canEnabled||![50000,100000,125000,250000,500000,1000000].includes(value))return json({error:'Disable CAN and select a supported bitrate'},409);canBitrate=value;return json({bitrate:canBitrate});}
     if(path==='/api/can/command')return json({queued:true});
     if(path==='/api/can/report')return new Response('UI preview only. No CAN hardware, frames, or SD file is present.',{headers:{'Content-Type':'text/plain'}});
-    if(path==='/api/can')return json({mode:'LISTEN_ONLY',active:canMode,acquiring:true,bitrate:500000,tx_gpio:25,rx_gpio:26,capacity:16,log:false,log_state:'DEMO_ONLY',file:'',frames:0,analysis_drops:0,log_drops:0,write_errors:0,db_full:0,driver_missed:0,driver_overruns:0,bus_errors:0,rows:0,phase:0,remaining_s:0,baseline_ready:false,action_ready:false,free_heap:0,min_heap:0,rx_queue_peak:0,log_queue_peak:0,ids:[],candidates:[],experiment:'',report_revision:0,demo:true});
+    if(path==='/api/can')return json({mode:'LISTEN_ONLY',active:canMode,enabled:canEnabled,requested_enabled:canEnabled,driver_state:canEnabled?'LISTENING':'DISABLED',acquiring:canEnabled,bitrate:canBitrate,running_bitrate:canEnabled?canBitrate:0,tx_gpio:25,rx_gpio:26,capacity:16,log:false,log_state:'DEMO_ONLY',file:'',frames:0,analysis_drops:0,log_drops:0,write_errors:0,db_full:0,driver_missed:0,driver_overruns:0,bus_errors:0,rows:0,phase:0,remaining_s:0,baseline_ready:false,action_ready:false,free_heap:0,min_heap:0,rx_queue_peak:0,log_queue_peak:0,ids:[],candidates:[],experiment:'',report_revision:0,demo:true});
     if (path === '/api/device') {
       const bit = deviceIds.indexOf(form.get('device'));
       if (bit < 0) return json({ error: 'Unknown demo device' }, 400);

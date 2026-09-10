@@ -386,7 +386,9 @@
     window.addEventListener('beforeunload', event => { if (session.active?.rows.length) { event.preventDefault(); event.returnValue = ''; } });
     // One outstanding request; slow down for long recording intervals.
     async function pollNext() {
-      await poll();
+      // CAN has its own 1 Hz status endpoint. Avoid duplicate sensor snapshots
+      // while the exclusive CAN workspace is active.
+      if (window.DashboardModes?.current() === 'dashboard') await poll();
       setTimeout(pollNext, document.hidden ? 2000 : window.DashboardModes?.interval() || 250);
     }
     pollNext();

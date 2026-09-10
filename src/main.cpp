@@ -157,7 +157,11 @@ const char *const deviceNames[] = {"ina1", "ina2", "ina3", "rtc", "imu", "mcp",
 constexpr uint32_t ALL_DEVICES_MASK = (1U << DEVICE_COUNT) - 1;
 std::atomic<uint32_t> enabledDevices{ALL_DEVICES_MASK};
 uint32_t deviceControlRevision = 0; // Wi-Fi task owns revision and switch writes.
-bool deviceEnabled(unsigned id) { return enabledDevices.load() & (1U << id); }
+bool deviceEnabled(unsigned id) {
+  const bool configured=enabledDevices.load() & (1U << id);
+  // CAN mode is exclusive: keep only SD available for raw CAN logging.
+  return configured && (id==DEV_SD || !canservice::active());
+}
 struct EncoderConfig { float ppr = 360, wheelMm = 100, ratio = 1; };
 EncoderConfig encoderConfig; // Protected by stateMutex after setup.
 struct ShuntConfig { float mohm[3] = {1.0f, 1.0f, 1.0f}; };
@@ -1258,7 +1262,7 @@ void sampleSupply() {
 void supplyTask(void *) {
   TickType_t wake = xTaskGetTickCount();
   for (;;) {
-    sampleSupply();
+    if(!canservice::active())sampleSupply();
     waitPeriod(wake, 50);
   }
 }
@@ -1391,7 +1395,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260910-passive-can-tabs-1";
+constexpr const char *FIRMWARE_BUILD = "20260910-dashboard-can-exclusive-2";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1590,7 +1594,7 @@ void recordingControlTask(void *) {
     const bool starting = (token & 1) && !(recordingToken.load() & 1);
     recordingToken.store(token);
     const uint32_t period = debugBlinkMs.load();
-    if (!(token & 1)) {
+    if (canservice::active() || !(token & 1)) {
       if (led) digitalWrite(DEBUG_LED_PIN, DEBUG_LED_OFF);
       led = false; ledChanged = now;
     } else if (starting || period != priorPeriod || uint32_t(now - ledChanged) >= period / 2) {
@@ -1958,10 +1962,25 @@ void wifiTask(void *) {
   server.on("/api/can/mode",HTTP_POST,[&]() {
     if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
     String mode=server.arg("mode");
-    if(mode!="can" && mode!="dashboard" && mode!="encoder" && mode!="imu") { server.send(400,"text/plain","Invalid mode");return; }
-    if(mode=="can" && !ENABLE_SD_LOGGING) { server.send(409,"text/plain","SD logging disabled in firmware");return; }
+    if(mode!="can" && mode!="dashboard") { server.send(400,"text/plain","Invalid mode");return; }
     if(!canservice::setMode(mode=="can")) { server.send(503,"text/plain","CAN queue unavailable; retry");return; }
     server.send(202,"application/json","{\"queued\":true}");
+  });
+  server.on("/api/can/control",HTTP_POST,[&]() {
+    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
+    const String value=server.arg("enabled");
+    if(value!="0" && value!="1") { server.send(400,"text/plain","enabled must be 0 or 1");return; }
+    if(value=="1" && !canservice::active()) { server.send(409,"text/plain","Enter CAN mode before enabling CAN");return; }
+    if(!canservice::setEnabled(value=="1")) { server.send(503,"text/plain","CAN control unavailable; retry");return; }
+    server.send(202,"application/json",String("{\"requested_enabled\":")+(value=="1"?"true":"false")+"}");
+  });
+  server.on("/api/can/bitrate",HTTP_POST,[&]() {
+    if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
+    const String raw=server.arg("bitrate");bool digits=raw.length()>0 && raw.length()<=7;
+    for(unsigned i=0;i<raw.length();++i)digits &= raw[i]>='0' && raw[i]<='9';
+    const uint32_t value=digits ? raw.toInt() : 0;
+    if(!canservice::setBitrate(value)) { server.send(409,"text/plain","Disable CAN and select 50, 100, 125, 250, 500 or 1000 kbit/s");return; }
+    server.send(200,"application/json",String("{\"bitrate\":")+canservice::bitrate()+"}");
   });
   server.on("/api/can/command",HTTP_POST,[&]() {
     if(server.header("X-Dashboard-Request")!="1") { server.send(403,"text/plain","Dashboard request required");return; }
@@ -1980,7 +1999,7 @@ void wifiTask(void *) {
     json += ",\"largest_free_block_bytes\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     const uint32_t token = recordingToken.load();
     json += ",\"firmware\":\"" + String(FIRMWARE_BUILD) + "\"";
-    json += ",\"recording\":" + String(token & 1 ? "true" : "false");
+    json += ",\"recording\":" + String((token & 1) && !canservice::active() ? "true" : "false");
     json += ",\"recording_session\":" + String(token >> 1);
     json += ",\"sw1_gpio\":" + String(RECORD_START_PIN);
     json += ",\"sw2_gpio\":" + String(RECORD_STOP_PIN);

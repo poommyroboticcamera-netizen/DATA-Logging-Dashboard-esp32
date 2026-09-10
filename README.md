@@ -46,13 +46,14 @@ The demo is rebuilt from the same HTML, CSS, and JavaScript embedded in the firm
 | Motion | MPU6050 or MPU6500 acceleration, roll, pitch, and yaw | Approx. 50 Hz |
 | Speed | Quadrature encoder, shaft RPM, wheel RPM, and km/h | 360 P/R, 100 mm wheel |
 | Output control | MCP23017 GA0–GA3 manual control and chase sequence | 2 Hz chase |
+| CAN analysis | Passive TWAI traffic discovery and raw SD CSV | Disabled at boot, 500 kbit/s |
 | Runtime | FreeRTOS tasks split across both ESP32 cores | Sensors on Core 1, web on Core 0 |
 
-## Passive CAN and compact sensor tabs
+## Dashboard and passive CAN modes
 
-The dashboard now includes **CAN + CSV**, **Encoder**, and **IMU** tabs. Entering CAN automatically starts a separate raw CAN CSV on SD; leaving it drains and closes that file. CAN remains listen-only, with no frame-transmit API or active-mode switch in the dashboard firmware. The Encoder/IMU tabs reuse existing sensor drivers and show compact numeric values at 1 Hz.
+The interface has two main functions. **Dashboard** keeps the original live sensors, Encoder, IMU, controls, settings, graphs, and sensor logging. **CAN Analyzer** is an exclusive workspace: entering it pauses INA226, RTC, IMU, MCP23017, DHT22, DS18B20, Encoder, the sensor logger, and its debug LED while keeping Wi-Fi, the web server, and SD access available for CAN capture. Returning to Dashboard disables CAN, drains and closes an active raw CAN file, and restores the saved Dashboard device configuration.
 
-Verify **CAN TX GPIO25 / RX GPIO26 / 500 kbit/s** in `src/can/Config.h` before wiring. I2C remains on GPIO21/22. The in-memory analyzer holds 16 traffic keys; independent SD capture includes untracked IDs subject to queue capacity. Standard/extended IDs, byte statistics, candidate fields/counters/checksums, and baseline/action comparison are available. Findings are candidates, not vehicle signal definitions.
+CAN is disabled at boot and remains disabled when the CAN page first opens. The operator can select **50, 100, 125, 250, 500, or 1000 kbit/s** while CAN is off; the choice is saved in ESP32 preferences. Once enabled, TWAI runs in listen-only mode with no frame-transmit API. Verify **CAN TX GPIO25 / RX GPIO26**, the chosen bitrate, and the transceiver before wiring. I2C remains on GPIO21/22. The in-memory analyzer holds 16 traffic keys; independent SD capture includes untracked IDs subject to queue capacity. Standard/extended IDs, byte statistics, candidate fields/counters/checksums, and baseline/action comparison are available. Findings are candidates, not vehicle signal definitions.
 
 See [architecture, algorithms, RAM budget, commands and bench/vehicle procedures](docs/can-analysis.md) and [validation results](docs/can-validation.md). The separate bench transmitter under `examples/` must never be connected to a vehicle.
 

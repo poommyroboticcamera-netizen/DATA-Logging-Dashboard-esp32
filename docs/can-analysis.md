@@ -2,7 +2,7 @@
 
 This implementation is integrated into the existing PlatformIO dashboard project. It contains no manufacturer database, vehicle-specific identifiers, DBC, signal names, assumed ECU count, scaling, or physical units. The separate bench sketch uses explicitly synthetic test identifiers.
 
-The analyzer installs TWAI in **LISTEN_ONLY**, disables the transmit queue, accepts all identifiers, and has no transmit API call, transmit command, diagnostic request, or active-mode switch. START resumes software acquisition; it does not change the controller mode. STOP pauses acquisition while the controller remains listen-only and the RX task drains the driver.
+The CAN driver is disabled and uninstalled at boot. In the CAN Analyzer workspace, the user explicitly enables TWAI in **LISTEN_ONLY** mode. The driver disables the transmit queue, accepts all identifiers, and exposes no transmit API call, transmit command, diagnostic request, or active controller mode. Disabling CAN stops and uninstalls the driver after the RX loop exits its bounded receive wait.
 
 Espressif documents listen-only mode as disabling message, ACK, and error-frame transmission. Classical ESP32 TWAI does not support CAN FD. See [Espressif TWAI documentation](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32/api-reference/peripherals/twai.html#operating-modes) and its overview. A bitrate mismatch cannot be diagnosed as an empty bus from silence alone.
 
@@ -16,23 +16,23 @@ Open this existing PlatformIO project and run `pio run`. The verified environmen
 | `src/can/Config.h` | CAN wiring, bitrate, memory limits |
 | `src/can/CanService.h/.cpp` | RX, analysis, SD, reporting tasks; Serial and HTTP bridge |
 | `src/can/Analysis.h/.cpp` | Portable statistics, fields, counter and checksum candidates |
-| `dashboard/can.js` | CAN lifecycle and lightweight Encoder/IMU tabs |
+| `dashboard/can.js` | Exclusive CAN lifecycle, bitrate, capture, and report controls |
 | `dashboard/index.html`, `style.css`, `app.js` | Dashboard layout, rendering and polling |
 | `tests/can/test_analysis.cpp` | Actual C++ analysis tests, assertions enabled even in optimized builds |
 | `dashboard/can.test.cjs` | CAN input and bounds tests |
 | `scripts/analyze_can_csv.py` | Offline checksum hypotheses and validation split |
 | `examples/can_bench_generator` | Separate guarded test transmitter; never compiled into dashboard firmware |
 
-**CAN defaults are TX GPIO25, RX GPIO26, 500 kbit/s. Verify these against the external transceiver before connecting.** GPIO21/22 already serve I2C and must not be reused for CAN. Existing Encoder GPIO32/33, MPU6050/MPU6500 handling, encoder geometry settings, SD SPI18/19/23/5, and saved sensor settings are reused. Supported compile-time bitrates are 50/100/125/250/500/1000 kbit/s. Discovery requires the correct bitrate; automatic bitrate scanning is not implemented.
+**CAN defaults are TX GPIO25, RX GPIO26, and 500 kbit/s. Verify these against the external transceiver before connecting.** GPIO21/22 already serve I2C and must not be reused for CAN. Existing Encoder GPIO32/33, MPU6050/MPU6500 handling, encoder geometry settings, SD SPI18/19/23/5, and saved sensor settings remain part of the original Dashboard. The CAN page supports 50/100/125/250/500/1000 kbit/s at runtime. Bitrate changes are accepted only while CAN is off and are persisted in ESP32 preferences. Discovery requires the correct bitrate; automatic bitrate scanning is not implemented.
 
-## Browser modes and automatic CSV
+## Two browser modes and CAN lifecycle
 
-- **Dashboard** preserves existing instruments and settings.
-- **CAN + CSV** automatically queues START and LOG START. Wait for `RECORDING` and a filename before assuming capture to SD has started. SD errors remain visible. A header-only CSV is created even when no frames arrive.
-- Leaving CAN queues LOG STOP. The file is drained and closed asynchronously; wait for the close message before removing the card. Closing a browser or losing Wi-Fi does not reliably send a mode-exit request: the ESP32 continues logging until explicitly stopped.
-- CAN mode temporarily gives raw CAN logging exclusive SD ownership; regular sensor SD capture is paused. Existing sensor readings continue. The old browser recording flag is suppressed during CAN mode. On leaving CAN, ordinary sensor recording can resume if the physical START token is still set.
-- **Encoder** shows speed, shaft/wheel RPM and counts using the existing calibration settings. **IMU** shows acceleration and roll/pitch/relative yaw using the existing verified IMU driver. The compact tabs do not run a 3D scene or draw a graph. Acceleration includes gravity; IMU is not used to invent a drift-free vehicle speed.
-- CAN snapshots poll once per second. Compact sensor views poll the existing state endpoint once per second; Dashboard retains its normal faster view. No high-rate raw CAN frame list accumulates in browser memory. On-demand reports retain only their last 4 KiB.
+- **Dashboard** preserves the existing sensors, Encoder, IMU, instruments, 3D model, settings, controls, graphs, and sensor CSV workflow.
+- **CAN Analyzer** pauses the Dashboard sensor acquisition gates, MCP23017 outputs, sensor CSV capture, and recording debug LED. The saved device-enable mask is preserved so the original configuration resumes after leaving CAN mode. Wi-Fi, HTTP, control tasks, and SD access remain available.
+- Opening CAN Analyzer does not start the CAN controller. Check the transceiver, select the bitrate while CAN is off, and press **Open CAN**. The driver reports `STARTING`, `LISTENING`, `STOPPING`, `DISABLED`, or `START_FAILED`.
+- Raw CAN CSV starts only when the user presses the CSV start control after the driver reaches `LISTENING`. Wait for `RECORDING` and a filename before assuming capture has started. SD errors remain visible. A header-only CSV is created even when no frames arrive.
+- Leaving CAN disables the driver and queues LOG STOP. The file is drained and closed asynchronously; wait for the close message before removing the card. Closing a browser or losing Wi-Fi does not reliably send a mode-exit request, so use the visible controls before disconnecting.
+- CAN snapshots poll once per second. No high-rate raw CAN frame list accumulates in browser memory. On-demand reports retain only their last 4 KiB.
 - This is one device-wide logging mode. Multiple browser clients can change the same mode; use one operator during capture. CSV files are stored on SD, not downloaded by the browser. Existing browser CSV files remain in their original sensor format.
 - The local/public demo uses no actual CAN traffic or SD files and says so explicitly. Synthetic sensor values in the pre-existing demo are presentation data, not hardware validation.
 
@@ -167,6 +167,7 @@ Short events may be missed by time-bin sampling, and sampling can alias activity
 | `IDS` | All tracked traffic keys and timing summaries |
 | `ID 321` | Details for numeric hexadecimal ID, all observed formats |
 | `ID 321 STD` / `ID 321 EXT` | Restrict format; RTR/DATA remain distinguished |
+| `CAN ON` / `CAN OFF` | Enable/disable the listen-only driver; CAN ON requires CAN mode |
 | `START` / `STOP` | Resume/pause software acquisition, always listen-only |
 | `BASELINE 10` | Record a new baseline |
 | `EXPERIMENT LABEL 10` | Record action against baseline; label <=23 characters without spaces |
@@ -176,7 +177,7 @@ Short events may be missed by time-bin sampling, and sampling can alias activity
 | `RESET` | Clear records/captures and aggregate analysis statistics |
 | `LOG START` / `LOG STOP` | Open a new SD session / drain and close files |
 
-Commands are case-insensitive and bounded to 79 input characters. Overlong lines are entirely discarded. Queue-full conditions return a retry response. SD sessions are independent of RESET. STOP acquisition does not close an open log; use LOG STOP to drain/close before removal.
+Commands are case-insensitive and bounded to 79 input characters. Overlong lines are entirely discarded. Queue-full conditions return a retry response. SD sessions are independent of RESET. `CAN OFF` also requests acquisition stop and drains an open CAN log; the lower-level `STOP` acquisition command alone does not close a log.
 
 ## Asynchronous logging and loss
 

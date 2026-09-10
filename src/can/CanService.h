@@ -9,8 +9,12 @@ struct CandidateView {
   float score=0;
 };
 bool begin(SemaphoreHandle_t sharedStorage);
-bool setMode(bool active); // Enter CAN starts CSV; leave CAN drains/closes it.
+bool setMode(bool active); // CAN mode suspends normal dashboard acquisition.
 bool active();
+bool enabled();
+bool setEnabled(bool enabled);
+bool setBitrate(uint32_t bitrate);
+uint32_t bitrate();
 bool command(const char *text);
 bool statusJson(char *buffer,size_t capacity);
 bool reportText(char *buffer,size_t capacity);

@@ -3,7 +3,7 @@
 // Unused GPIOs in the current dashboard map. VERIFY the transceiver wiring.
 // Do not use GPIO21/22: those already belong to the I2C sensor bus.
 constexpr int CAN_TX_PIN=25, CAN_RX_PIN=26;
-constexpr uint32_t CAN_BITRATE=500000;
+constexpr uint32_t DEFAULT_CAN_BITRATE=500000;
 constexpr int SD_SCK_PIN=18, SD_MISO_PIN=19, SD_MOSI_PIN=23, SD_CS_PIN=5;
 // Bounded web + existing sensor profile. SD captures untracked IDs too.
 constexpr unsigned MAX_IDS=16, SAMPLE_COUNT=32;

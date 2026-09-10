@@ -9,4 +9,6 @@ assert.throws(()=>C.packet({mode:'NORMAL',ids:[],candidates:[]}));
 assert.throws(()=>C.packet({mode:'LISTEN_ONLY',ids:new Array(129),candidates:[]}));
 assert.throws(()=>C.packet({mode:'LISTEN_ONLY',ids:[],candidates:new Array(13)}));
 assert.equal(C.packet({mode:'LISTEN_ONLY',ids:[],candidates:[]}).ids.length,0);
-console.log('PASS: CAN mode, bounded payloads, experiment durations/labels, hexadecimal identifiers');
+assert.equal(C.driverStates.DISABLED,'CAN ปิดอยู่');
+assert.equal(C.driverStates.LISTENING,'CAN กำลังรับข้อมูล');
+console.log('PASS: exclusive CAN mode, bounded payloads, controls, experiment durations/labels, hexadecimal identifiers');

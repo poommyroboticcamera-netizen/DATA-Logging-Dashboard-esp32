@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SD.h>
+#include <Preferences.h>
 #include <driver/twai.h>
 #include <esp_timer.h>
 #include <atomic>
@@ -16,7 +17,12 @@ QueueHandle_t frameQueue, commandQueue, noticeQueue, logQueue, logCommands;
 QueueHandle_t reportQueue, outputQueue;
 SemaphoreHandle_t storageMutex=nullptr;
 std::atomic<bool> ready{false}, modeActive{false};
+std::atomic<bool> driverRequested{false}, driverRunning{false};
+std::atomic<uint32_t> configuredBitrate{DEFAULT_CAN_BITRATE}, runningBitrate{0};
+std::atomic<const char *> driverState{"DISABLED"};
 std::atomic<const char *> logState{"STOPPED"};
+Preferences canPreferences;
+bool canPreferencesReady=false;
 static char logPath[32]={};
 static CandidateView candidateCache[12]={};
 static unsigned candidateCount=0;
@@ -27,7 +33,7 @@ static uint32_t reportRevision=0;
 SemaphoreHandle_t dbMutex, logGate;
 Record *records[MAX_IDS] = {};
 static Record snapshot;
-std::atomic<bool> acquiring{true}, logEnabled{false};
+std::atomic<bool> acquiring{false}, logEnabled{false};
 std::atomic<uint32_t> rxFrames{0}, analysisDrops{0}, logDrops{0}, logWritten{0};
 std::atomic<uint32_t> logErrors{0}, logDiscarded{0}, invalidFrames{0}, dbFullFrames{0};
 std::atomic<uint32_t> epoch{0}, driverMissed{0}, driverOverruns{0}, busErrors{0};
@@ -70,6 +76,22 @@ public:
 } reportOut;
 
 static uint64_t nowUs() { return uint64_t(esp_timer_get_time()); }
+static bool supportedBitrate(uint32_t bitrate) {
+  switch(bitrate) {
+    case 50000: case 100000: case 125000: case 250000: case 500000: case 1000000: return true;
+    default: return false;
+  }
+}
+static twai_timing_config_t timingFor(uint32_t bitrate) {
+  switch(bitrate) {
+    case 1000000: return TWAI_TIMING_CONFIG_1MBITS();
+    case 500000: return TWAI_TIMING_CONFIG_500KBITS();
+    case 250000: return TWAI_TIMING_CONFIG_250KBITS();
+    case 125000: return TWAI_TIMING_CONFIG_125KBITS();
+    case 100000: return TWAI_TIMING_CONFIG_100KBITS();
+    default: return TWAI_TIMING_CONFIG_50KBITS();
+  }
+}
 static void notice(const char *text, bool summary = false) {
   Notice n = {}; snprintf(n.text, sizeof(n.text), "%s", text); n.summary = summary;
   // Nonblocking. A full notice queue never stops analysis; STATUS remains authoritative.
@@ -82,7 +104,32 @@ static void highWater(std::atomic<uint32_t> &dest, QueueHandle_t q) {
 static void rxTask(void *) {
   uint64_t lastHealth = 0;
   uint32_t previousMissed = 0, previousOverruns = 0;
+  bool installed=false;
   for (;;) {
+    const bool requested=driverRequested.load();
+    if(requested && !installed) {
+      const uint32_t requestedBitrate=configuredBitrate.load();
+      driverState="STARTING";
+      twai_general_config_t general=TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN,(gpio_num_t)CAN_RX_PIN,TWAI_MODE_LISTEN_ONLY);
+      general.tx_queue_len=0;general.rx_queue_len=DRIVER_RX_DEPTH;
+      twai_timing_config_t timing=timingFor(requestedBitrate);
+      twai_filter_config_t filter=TWAI_FILTER_CONFIG_ACCEPT_ALL();
+      const esp_err_t installResult=twai_driver_install(&general,&timing,&filter);
+      const esp_err_t startResult=installResult==ESP_OK ? twai_start() : installResult;
+      if(installResult!=ESP_OK || startResult!=ESP_OK) {
+        if(installResult==ESP_OK)twai_driver_uninstall();
+        driverRequested=false;driverRunning=false;runningBitrate=0;driverState="START_FAILED";
+        notice("CAN start failed; receiver remains disabled.");vTaskDelay(pdMS_TO_TICKS(100));continue;
+      }
+      installed=true;driverRunning=true;runningBitrate=requestedBitrate;driverState="LISTENING";
+      previousMissed=previousOverruns=0;lastHealth=nowUs();++epoch;
+      notice("CAN receiver enabled in LISTEN_ONLY mode.");
+    } else if(!requested && installed) {
+      driverState="STOPPING";twai_stop();twai_driver_uninstall();installed=false;
+      driverRunning=false;runningBitrate=0;driverState="DISABLED";++epoch;
+      notice("CAN receiver disabled.");
+    }
+    if(!installed) { vTaskDelay(pdMS_TO_TICKS(10));continue; }
     twai_message_t m = {};
     esp_err_t result = twai_receive(&m, pdMS_TO_TICKS(10));
     uint64_t workStart = nowUs();
@@ -268,7 +315,7 @@ static void loggerTask(void *) {
           ++logErrors; csv.close(); meta.close(); notice("SD open/header failed.");logState="OPEN_FAILED";xSemaphoreGive(storageMutex);continue;
         }
         if (!meta.printf("LISTEN_ONLY,bitrate=%lu,timestamp=task_dequeue_us\nSTART,rx=%lu,analysis_drop=%lu,log_drop=%lu\n",
-          (unsigned long)CAN_BITRATE,(unsigned long)rxFrames.load(),(unsigned long)analysisDrops.load(),(unsigned long)logDrops.load())) {
+          (unsigned long)configuredBitrate.load(),(unsigned long)rxFrames.load(),(unsigned long)analysisDrops.load(),(unsigned long)logDrops.load())) {
           ++logErrors; csv.close(); meta.close(); notice("SD metadata write failed.");logState="WRITE_FAILED";xSemaphoreGive(storageMutex);continue;
         }
         buffered = 0; bufferedRows = 0; open = true;
@@ -466,10 +513,10 @@ static void status() {
   Phase p=phase; bool br=baselineReady, ar=actionReady;
   xSemaphoreGive(dbMutex);
   reportOut.printf("Mode=LISTEN_ONLY bitrate=%lu acquiring=%u log=%u IDs=%u/%u frames_analyzed=%llu rx_lifetime=%lu bytes=%llu\n",
-    (unsigned long)CAN_BITRATE,acquiring.load(),logEnabled.load(),ids,MAX_IDS,(unsigned long long)frames,
+    (unsigned long)configuredBitrate.load(),acquiring.load(),logEnabled.load(),ids,MAX_IDS,(unsigned long long)frames,
     (unsigned long)rxFrames.load(),(unsigned long long)bytes);
   reportOut.printf("observed_fps=%.2f unstuffed_observed_bus_load_estimate=%.2f%% active_seconds=%.2f\n",
-    elapsed ? frames*1e6/elapsed : 0,elapsed ? bits*1e8/(double(elapsed)*CAN_BITRATE) : 0,elapsed*1e-6);
+    elapsed ? frames*1e6/elapsed : 0,elapsed ? bits*1e8/(double(elapsed)*configuredBitrate.load()) : 0,elapsed*1e-6);
   reportOut.printf("loss: analysis_queue=%lu logger_queue_or_gate=%lu driver_missed=%lu driver_overrun=%lu database_full_frames=%lu invalid=%lu bus_errors=%lu\n",
     (unsigned long)analysisDrops.load(),(unsigned long)logDrops.load(),(unsigned long)driverMissed.load(),
     (unsigned long)driverOverruns.load(),(unsigned long)dbFullFrames.load(),(unsigned long)invalidFrames.load(),(unsigned long)busErrors.load());
@@ -523,6 +570,9 @@ static void fatal(const char *message) {
 }
 bool begin(SemaphoreHandle_t sharedStorage) {
   storageMutex=sharedStorage;
+  canPreferencesReady=canPreferences.begin("can-config",false);
+  const uint32_t savedBitrate=canPreferencesReady ? canPreferences.getUInt("bitrate",DEFAULT_CAN_BITRATE) : DEFAULT_CAN_BITRATE;
+  configuredBitrate=supportedBitrate(savedBitrate) ? savedBitrate : DEFAULT_CAN_BITRATE;
   for(unsigned i=0;i<MAX_IDS;++i) {
     records[i]=new(std::nothrow) Record;
     if(!records[i])fatal("ID record allocation failed; reduce MAX_IDS.");
@@ -532,21 +582,6 @@ bool begin(SemaphoreHandle_t sharedStorage) {
   commandQueue=xQueueCreate(8,sizeof(Command));noticeQueue=xQueueCreate(16,sizeof(Notice));logCommands=xQueueCreate(4,sizeof(char));
   reportQueue=xQueueCreate(4,sizeof(Command));outputQueue=xQueueCreate(16,sizeof(OutputChunk));
   if(!dbMutex || !logGate || !frameQueue || !logQueue || !commandQueue || !noticeQueue || !logCommands || !reportQueue || !outputQueue)fatal("Allocation failed; reduce MAX_IDS or queue capacity.");
-  twai_general_config_t general=TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN,(gpio_num_t)CAN_RX_PIN,TWAI_MODE_LISTEN_ONLY);
-  general.tx_queue_len=0;general.rx_queue_len=DRIVER_RX_DEPTH;
-  twai_timing_config_t timing=TWAI_TIMING_CONFIG_500KBITS();
-  switch(CAN_BITRATE) {
-    case 1000000: timing=TWAI_TIMING_CONFIG_1MBITS();break;
-    case 500000: break;
-    case 250000: timing=TWAI_TIMING_CONFIG_250KBITS();break;
-    case 125000: timing=TWAI_TIMING_CONFIG_125KBITS();break;
-    case 100000: timing=TWAI_TIMING_CONFIG_100KBITS();break;
-    case 50000: timing=TWAI_TIMING_CONFIG_50KBITS();break;
-    default: fatal("Unsupported configured bitrate.");
-  }
-  twai_filter_config_t filter=TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  if(twai_driver_install(&general,&timing,&filter)!=ESP_OK)fatal("TWAI install failed.");
-  if(twai_start()!=ESP_OK)fatal("TWAI listen-only start failed.");
   activeSince=acceptAfter=nowUs();
   const BaseType_t workerCore=portNUM_PROCESSORS>1?1:0;
   if(xTaskCreatePinnedToCore(rxTask,"can-rx",3072,nullptr,20,nullptr,0)!=pdPASS ||
@@ -556,11 +591,16 @@ bool begin(SemaphoreHandle_t sharedStorage) {
   ready=true;return true;
 }
 bool active() { return modeActive.load(); }
+bool enabled() { return driverRunning.load(); }
+uint32_t bitrate() { return configuredBitrate.load(); }
 bool command(const char *text) {
   if(!ready || !text || strlen(text)>=80)return false;
   Command c={};snprintf(c.text,sizeof(c.text),"%s",text);c.us=nowUs();
   for(char *p=c.text;*p;++p)*p=toupper(static_cast<unsigned char>(*p));
+  if(!strcmp(c.text,"CAN ON"))return setEnabled(true);
+  if(!strcmp(c.text,"CAN OFF"))return setEnabled(false);
   if(!strcmp(c.text,"LOG START") || !strcmp(c.text,"LOG STOP")) {
+    if(!strcmp(c.text,"LOG START") && (!modeActive.load() || !driverRunning.load()))return false;
     char code=!strcmp(c.text,"LOG START")?'S':'T';
     return xQueueSend(logCommands,&code,0)==pdTRUE;
   }
@@ -571,9 +611,29 @@ bool command(const char *text) {
 bool setMode(bool enabled) {
   if(!ready)return false;
   if(enabled==modeActive.load())return true;
-  if(enabled && !command("START"))return false;
-  if(!command(enabled?"LOG START":"LOG STOP"))return false;
-  modeActive=enabled;return true;
+  if(enabled) { modeActive=true;return true; }
+  bool ok=setEnabled(false);modeActive=false;return ok;
+}
+bool setEnabled(bool enabled) {
+  if(!ready || (enabled && !modeActive.load()))return false;
+  if(enabled) {
+    if(driverRequested.load())return true;
+    if(!command("START"))return false;
+    driverRequested=true;
+  } else {
+    const bool wasRequested=driverRequested.exchange(false);
+    bool ok=true;
+    if(wasRequested || acquiring.load())ok=command("STOP") && ok;
+    if(strcmp(logState.load(),"STOPPED"))ok=command("LOG STOP") && ok;
+    return ok;
+  }
+  return true;
+}
+bool setBitrate(uint32_t value) {
+  if(!ready || !supportedBitrate(value) || driverRequested.load() || driverRunning.load())return false;
+  if(value==configuredBitrate.load())return true;
+  if(!canPreferencesReady || canPreferences.putUInt("bitrate",value)!=sizeof(uint32_t))return false;
+  configuredBitrate=value;command("RESET");return true;
 }
 static char serialLine[80];static unsigned serialLength=0;
 static bool serialLineActive=false,serialOverflow=false,serialRequested=false;
@@ -637,8 +697,9 @@ bool statusJson(char *buffer,size_t capacity) {
   xSemaphoreGive(dbMutex);
   const uint64_t current=nowUs();
   for(char *p=label;*p;++p)if(!isalnum(static_cast<unsigned char>(*p)) && *p!='_' && *p!='-')*p='_';
-  append("{\"mode\":\"LISTEN_ONLY\",\"active\":%s,\"acquiring\":%s,\"bitrate\":%lu,\"tx_gpio\":%d,\"rx_gpio\":%d,\"capacity\":%u,\"log\":%s,\"log_state\":\"%s\",\"file\":\"%s\",",
-    modeActive?"true":"false",acquiring?"true":"false",(unsigned long)CAN_BITRATE,CAN_TX_PIN,CAN_RX_PIN,MAX_IDS,
+  append("{\"mode\":\"LISTEN_ONLY\",\"active\":%s,\"enabled\":%s,\"requested_enabled\":%s,\"driver_state\":\"%s\",\"acquiring\":%s,\"bitrate\":%lu,\"running_bitrate\":%lu,\"tx_gpio\":%d,\"rx_gpio\":%d,\"capacity\":%u,\"log\":%s,\"log_state\":\"%s\",\"file\":\"%s\",",
+    modeActive?"true":"false",driverRunning?"true":"false",driverRequested?"true":"false",driverState.load(),
+    acquiring?"true":"false",(unsigned long)configuredBitrate.load(),(unsigned long)runningBitrate.load(),CAN_TX_PIN,CAN_RX_PIN,MAX_IDS,
     logEnabled?"true":"false",logState.load(),path);
   append("\"frames\":%llu,\"analysis_drops\":%lu,\"log_drops\":%lu,\"write_errors\":%lu,\"db_full\":%lu,\"driver_missed\":%lu,\"driver_overruns\":%lu,\"bus_errors\":%lu,\"rows\":%lu,\"phase\":%u,\"remaining_s\":%u,\"baseline_ready\":%s,\"action_ready\":%s,",
     (unsigned long long)frames,(unsigned long)analysisDrops.load(),(unsigned long)logDrops.load(),(unsigned long)logErrors.load(),
