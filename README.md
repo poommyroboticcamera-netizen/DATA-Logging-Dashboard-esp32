@@ -24,7 +24,7 @@
 
 This project turns an ESP32 into a compact telemetry hub for electrical, environmental, motion, and speed measurements. The firmware samples sensors in dedicated FreeRTOS tasks, publishes a responsive dashboard over the local Wi-Fi network, and records structured CSV data for later analysis in Excel or another data tool.
 
-The dashboard is compiled into the firmware, so no separate filesystem upload is required. Live charts, controls, and the optional IMU orientation model run in the browser to keep the ESP32 workload predictable.
+The dashboard is compiled into the firmware, so no separate filesystem upload is required. Live charts, controls, and the optional IMU orientation model run in the browser to keep the ESP32 workload predictable. The ESP32 also exposes a direct fallback network named `ESP32-Dashboard`; connect with password `esp32dash` and open `http://192.168.4.1/` when the existing router or hotspot prevents devices from reaching each other.
 
 > [!IMPORTANT]
 > This repository is an engineering prototype. Software checks are included, but measurement accuracy, electrical safety, and long-duration stability must still be validated on the target PCB.

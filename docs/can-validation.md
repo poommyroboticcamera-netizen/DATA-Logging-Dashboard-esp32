@@ -6,7 +6,7 @@ Validation completed on 2026-09-10 for the integrated ESP32 dashboard project. T
 
 | Target | Toolchain | Result | Static usage |
 |:--|:--|:--|:--|
-| Integrated dashboard firmware | PlatformIO, Espressif32 6.10.0, Arduino ESP32 2.0.17, `esp32dev` | PASS | 65,608 B RAM (20.0%); 971,553 B flash (74.1%) |
+| Integrated dashboard firmware | PlatformIO, Espressif32 6.10.0, Arduino ESP32 2.0.17, `esp32dev` | PASS | 65,608 B RAM (20.0%); 972,913 B flash (74.2%) |
 | Isolated bench generator | Arduino CLI, Arduino ESP32 2.0.10, `esp32:esp32:esp32` | PASS | 21,456 B RAM (6%); 267,497 B flash (20%) |
 
 The dashboard web bundle is 105,322 bytes before gzip and 28,536 bytes after gzip. The resulting firmware binary is available at `.pio/build/esp32dev/firmware.bin` after a successful build.

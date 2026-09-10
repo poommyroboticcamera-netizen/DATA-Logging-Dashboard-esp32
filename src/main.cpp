@@ -1395,7 +1395,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260910-dashboard-can-exclusive-2";
+constexpr const char *FIRMWARE_BUILD = "20260910-dashboard-can-ap-fallback-3";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1943,9 +1943,10 @@ void sdWriterTask(void *) {
 
 // The Wi-Fi server owns network IO. It never reads I2C directly.
 void wifiTask(void *) {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
+  const bool directApReady=WiFi.softAP(DASHBOARD_AP_SSID,DASHBOARD_AP_PASSWORD);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WebServer server(80);
   const char *requestHeaders[] = {"X-Dashboard-Request"};
@@ -2226,22 +2227,27 @@ void wifiTask(void *) {
     server.send(200, "application/json", json);
   });
   server.onNotFound([&]() { server.send(404, "text/plain", "Not found"); });
-  bool started = false;
+  // Listen on both interfaces. The direct AP stays usable even if the router
+  // disconnects the station or prevents clients from reaching each other.
+  server.begin();
+  if(directApReady)logf("Dashboard direct: Wi-Fi %s, http://%s/\n",DASHBOARD_AP_SSID,WiFi.softAPIP().toString().c_str());
+  else logLine("Dashboard direct Wi-Fi failed to start");
   uint32_t lastRetry = millis();
+  bool stationAnnounced=false;
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
-      if (!started) {
-        server.begin(); started = true;
+      if(!stationAnnounced) {
         logf("Wi-Fi dashboard: http://%s (same Wi-Fi network)\n", WiFi.localIP().toString().c_str());
+        stationAnnounced=true;
       }
-      server.handleClient();
     } else {
-      if (started) { server.stop(); started = false; }
+      stationAnnounced=false;
       if (millis() - lastRetry >= 15000) {
         logLine("Wi-Fi: waiting for 2.4 GHz network; reconnecting");
         WiFi.reconnect(); lastRetry = millis();
       }
     }
+    server.handleClient();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -2253,10 +2259,16 @@ void consoleTask(void *) {
   uint32_t telemetrySequence = 0;
   bool streaming = false;
   String lastWebIp;
+  bool directUrlPrinted=false;
   for (;;) {
     canservice::pollConsole(SERIAL_IP_ONLY);
     if (SERIAL_IP_ONLY) {
       // Print once per connection/IP change; sensor data stays on the web.
+      if(!directUrlPrinted && WiFi.softAPIP()!=IPAddress(0,0,0,0)) {
+        Serial.printf("Direct dashboard: connect Wi-Fi %s (password %s), then open http://%s/\n",
+          DASHBOARD_AP_SSID,DASHBOARD_AP_PASSWORD,WiFi.softAPIP().toString().c_str());
+        directUrlPrinted=true;
+      }
       if (WiFi.status() == WL_CONNECTED) {
         const String ip = WiFi.localIP().toString();
         if (ip != "0.0.0.0" && ip != lastWebIp) {
