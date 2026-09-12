@@ -55,6 +55,15 @@
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename(record);
     document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
+  function deleteFile(record) {
+    if (!db) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('records', 'readwrite');
+      tx.objectStore('records').delete(record.id);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+    });
+  }
   function renderFiles() {
     $('files').replaceChildren();
     if (!files.length) { const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'เมื่อบันทึกเสร็จ ไฟล์การทดสอบจะปรากฏที่นี่'; $('files').append(p); return; }
@@ -62,8 +71,24 @@
       const row = document.createElement('div'); row.className = 'file';
       const info = document.createElement('div'), name = document.createElement('strong'), meta = document.createElement('small');
       name.textContent = filename(record); meta.textContent = `${record.rows.length.toLocaleString()} แถว · ${reasons[record.reason] || record.reason}`;
-      info.append(name, meta); const button = document.createElement('button'); button.textContent = 'ดาวน์โหลด CSV'; button.onclick = () => download(record);
-      row.append(info, button); $('files').append(row);
+      const actions = document.createElement('div'), downloadButton = document.createElement('button'), deleteButton = document.createElement('button');
+      actions.className = 'file-actions'; downloadButton.textContent = 'ดาวน์โหลด CSV'; downloadButton.onclick = () => download(record);
+      deleteButton.className = 'delete-file'; deleteButton.textContent = 'ลบไฟล์'; deleteButton.setAttribute('aria-label', 'ลบ ' + filename(record));
+      deleteButton.onclick = async () => {
+        if (!window.confirm(`ลบไฟล์ ${filename(record)} หรือไม่?\nเมื่อลบแล้วจะกู้คืนไม่ได้`)) return;
+        downloadButton.disabled = deleteButton.disabled = true; deleteButton.textContent = 'กำลังลบ…';
+        try {
+          await deleteFile(record);
+          files = files.filter(file => file.id !== record.id);
+          renderFiles(); recordingUI();
+          $('history-note').textContent = 'ลบไฟล์แล้ว · ไฟล์ CSV เปิดด้วย Excel ได้';
+        } catch (error) {
+          downloadButton.disabled = deleteButton.disabled = false; deleteButton.textContent = 'ลบไฟล์';
+          $('history-note').textContent = 'ลบไฟล์ไม่สำเร็จ: ' + error.message;
+        }
+      };
+      info.append(name, meta); actions.append(downloadButton, deleteButton);
+      row.append(info, actions); $('files').append(row);
     });
   }
   async function persist(completed = []) {
@@ -196,6 +221,7 @@
   }
   function renderControls() {
     const online = received && Date.now() - lastSuccess < 2500;
+    $('imu-calibrate').disabled = !online || !C.enabled(deviceMask, 'imu') || controlsBusy;
     C.DEVICES.forEach(([id, label]) => {
       const button = $('device-' + id); if (!button) return;
       const on = C.enabled(deviceMask, id);
@@ -296,6 +322,19 @@
     for (let i = 1; i <= 3; i++) {
       const row = document.createElement('tr'); row.innerHTML = `<td>CH ${i}</td><td id="ina${i}_voltage_v">—</td><td id="ina${i}_current_a">—</td><td id="ina${i}_power_w">—</td><td id="ina${i}_status">รอข้อมูล</td>`; $('ina-rows').append(row);
     }
+    $('imu-calibrate').onclick = async () => {
+      if (controlsBusy) return;
+      controlsBusy = true; renderControls();
+      $('yaw-note').textContent = 'กำลังเริ่มคาลิเบรต · วางบอร์ดให้นิ่ง';
+      try {
+        await controlPost('/api/imu', { action: 'calibrate' });
+        $('yaw-note').textContent = 'วางบอร์ดให้นิ่ง · รอคาลิเบรต 0/200';
+      } catch (error) {
+        $('yaw-note').textContent = 'เริ่มคาลิเบรตไม่สำเร็จ: ' + error.message;
+      } finally {
+        controlsBusy = false; renderControls();
+      }
+    };
     [['dht', 'DHT22'], ['ds1', 'DS18B20 · 1'], ['ds2', 'DS18B20 · 2'], ['ds3', 'DS18B20 · 3'], ['ds4', 'DS18B20 · 4'], ['imu-temp', 'IMU']].forEach(([id, label]) => {
       const cell = document.createElement('div'); cell.innerHTML = `<label>${label}</label><strong id="${id}">—</strong><small>°C</small>`; if (/^ds[1-4]$/.test(id)) { const status = document.createElement('div'); status.id = id + '-state'; status.className = 'ds-state'; status.textContent = 'รอข้อมูล'; cell.append(status); const rom = document.createElement('div'); rom.id = id + '-rom'; rom.className = 'ds-state'; cell.append(rom); } $('temperatures').append(cell);
     });

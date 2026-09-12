@@ -2097,6 +2097,22 @@ void wifiTask(void *) {
     if (!enqueueCommand(mcpCommands, command)) { server.send(503, "text/plain", "Command queue full"); return; }
     server.send(202, "application/json", "{\"queued\":true}");
   });
+  server.on("/api/imu", HTTP_POST, [&]() {
+    if (server.header("X-Dashboard-Request") != "1") {
+      server.send(403, "text/plain", "Dashboard request required"); return;
+    }
+    if (server.arg("action") != "calibrate") {
+      server.send(400, "text/plain", "Invalid IMU action"); return;
+    }
+    if (!deviceEnabled(DEV_IMU) || !supplyBusEnabled.load()) {
+      server.send(409, "text/plain", "IMU is disabled or supply paused"); return;
+    }
+    const char command = 'c';
+    if (!enqueueCommand(imuCommands, command)) {
+      server.send(503, "text/plain", "Command queue full"); return;
+    }
+    server.send(202, "application/json", "{\"queued\":true}");
+  });
   server.on("/api/encoder", HTTP_POST, [&]() {
     if (server.header("X-Dashboard-Request") != "1") { server.send(403, "text/plain", "Dashboard request required"); return; }
     EncoderConfig config;

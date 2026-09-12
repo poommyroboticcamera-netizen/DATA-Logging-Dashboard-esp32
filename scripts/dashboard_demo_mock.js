@@ -33,6 +33,8 @@
   let gaStepMs = 500;
   let shuntMohm = [1, 1, 1];
   let encoder = { ppr: 360, wheel_mm: 100, ratio: 1 };
+  let yawCalibrationStarted = null;
+  let yawReference = 3;
 
   const enabled = id => {
     const bit = deviceIds.indexOf(id);
@@ -55,6 +57,12 @@
     const rpm = 105.87 + wave * 7.5;
     const wheelCircumferenceM = Math.PI * encoder.wheel_mm / 1000;
     const wheelRpm = rpm / encoder.ratio;
+    let yawSamples = 200;
+    if (yawCalibrationStarted !== null) {
+      yawSamples = Math.min(200, Math.floor((Date.now() - yawCalibrationStarted) / 20));
+      if (yawSamples >= 200) { yawCalibrationStarted = null; yawReference += 1; }
+    }
+    const yawCalibrating = yawCalibrationStarted !== null;
     const speed = wheelRpm * wheelCircumferenceM * 60 / 1000;
     const ina = [
       { voltage: 12.48 + slowWave * 0.03, current: 1.24 + wave * 0.08 },
@@ -86,7 +94,7 @@
       imu_valid: enabled('imu') ? '1' : '0',
       tilt_valid: enabled('imu') ? '1' : '0',
       roll_valid: enabled('imu') ? '1' : '0',
-      yaw_valid: enabled('imu') ? '1' : '0',
+      yaw_valid: enabled('imu') && !yawCalibrating ? '1' : '0',
       imu_age_ms: '7',
       encoder_count: String(Math.floor(seconds * 2540.9)),
       encoder_counts_s: f(2540.9 + wave * 180),
@@ -101,9 +109,9 @@
       supply_adc_mv: '',
       supply_valid: '0',
       dropped_records: '0',
-      yaw_calibrating: '0',
-      yaw_calibration_samples: '200',
-      yaw_reference: '3',
+      yaw_calibrating: yawCalibrating ? '1' : '0',
+      yaw_calibration_samples: String(yawSamples),
+      yaw_reference: String(yawReference),
       record_interval_ms: String(intervalMs),
       enabled_devices_mask: String(devicesMask)
     };
@@ -182,6 +190,11 @@
       else if (form.get('mode') === 'toggle') { gaMask ^= 1 << Number(form.get('channel')); gaChase = false; }
       else if (form.get('mode') === 'chase') gaChase = true;
       return json({ ok: true });
+    }
+    if (path === '/api/imu') {
+      if (form.get('action') !== 'calibrate' || !enabled('imu')) return json({ error: 'IMU is not ready' }, 409);
+      yawCalibrationStarted = Date.now();
+      return json({ queued: true }, 202);
     }
     if (path === '/api/ga-frequency') {
       const hz = Math.min(20, Math.max(0.2, Number(form.get('hz'))));
