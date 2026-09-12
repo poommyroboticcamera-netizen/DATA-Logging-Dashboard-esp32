@@ -145,6 +145,10 @@ const ImuModel = (() => {
     function frame(now) {
       raf=0;
       if (paused || document.hidden || !visible || !valid) return;
+      // The data logger has priority over animation. Twenty visual frames per
+      // second are sufficient for this preview and leave the main thread free
+      // to receive a burst of sensor packets on schedule.
+      if(lastFrame && now-lastFrame<50){raf=requestAnimationFrame(frame);return;}
       // A small playback delay absorbs packet timing jitter. The final filter
       // softens velocity changes without repeatedly stopping at each packet.
       const dt=lastFrame ? Math.min(50,Math.max(0,now-lastFrame)) : 16;lastFrame=now;

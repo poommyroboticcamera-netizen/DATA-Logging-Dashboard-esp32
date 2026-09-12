@@ -35,6 +35,8 @@
   let encoder = { ppr: 360, wheel_mm: 100, ratio: 1 };
   let yawCalibrationStarted = null;
   let yawReference = 3;
+  let lastRecordAt = 0;
+  let recordSequence = 0;
 
   const enabled = id => {
     const bit = deviceIds.indexOf(id);
@@ -49,8 +51,7 @@
   });
   const formValues = init => new URLSearchParams(init?.body?.toString?.() || '');
 
-  function sampleValues() {
-    const uptime = Date.now() - startedAt;
+  function sampleValues(uptime = Date.now() - startedAt) {
     const seconds = uptime / 1000;
     const wave = Math.sin(seconds * 0.72);
     const slowWave = Math.sin(seconds * 0.24);
@@ -72,7 +73,7 @@
     const values = {
       sequence: String(Math.floor(uptime / intervalMs)),
       uptime_ms: String(uptime),
-      rtc_datetime: rtcText(new Date()),
+      rtc_datetime: rtcText(new Date(startedAt + uptime)),
       rtc_valid: enabled('rtc') ? '1' : '0',
       rtc_age_ms: '112',
       supply_on: '',
@@ -141,7 +142,22 @@
       const step = Math.floor((Date.now() - startedAt) / gaStepMs) % 4;
       gaMask = 1 << (3 - step);
     }
-    const values = sampleValues();
+    const uptime = Date.now() - startedAt;
+    const values = sampleValues(uptime);
+    const recordSamples = [];
+    while (lastRecordAt + intervalMs <= uptime && recordSamples.length < 32) {
+      lastRecordAt += intervalMs;
+      const recorded = sampleValues(lastRecordAt);
+      recorded.sequence = String(++recordSequence);
+      recordSamples.push({
+        captured_ms: lastRecordAt,
+        recording_session: 1,
+        interval_ms: intervalMs,
+        devices_mask: devicesMask,
+        supply: 'manual',
+        csv: header.map(key => recorded[key] ?? '').join(',')
+      });
+    }
     return {
       boot,
       supply: 'manual',
@@ -167,6 +183,9 @@
       sd_mounted: enabled('sd'),
       sd_status: enabled('sd') ? 'READY' : 'DISABLED',
       sd_written: Math.floor((Date.now() - startedAt) / intervalMs),
+      record_samples: recordSamples,
+      record_buffer_pending: 0,
+      record_buffer_dropped: 0,
       demo: true
     };
   }
@@ -219,6 +238,8 @@
     }
     if (path === '/api/settings') {
       intervalMs = Number(form.get('interval_ms'));
+      lastRecordAt = Date.now() - startedAt;
+      recordSequence = 0;
       return json({ interval_ms: intervalMs });
     }
     return json({ error: 'Unknown demo endpoint' }, 404);

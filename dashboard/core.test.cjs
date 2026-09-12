@@ -25,6 +25,9 @@ assert.equal(recovered.finish('manual'), null);
 assert.equal(C.number({ x: '' }, 'x'), null);
 assert.equal(C.number({ x: 'nan' }, 'x'), null);
 assert.equal(C.number({ x: '0' }, 'x'), 0);
+assert.equal(C.canSyncPreview(300, 300, 0), true);
+assert.equal(C.canSyncPreview(299, 300, 0), false, 'older live preview must not look like a device reset after a buffered sample');
+assert.equal(C.canSyncPreview(400, 300, 1), false, 'preview waits while older buffered samples remain');
 assert.throws(() => C.parse({ header: 'uptime_ms,a', csv: '1', supply: 'on' }));
 let manual = new C.Session();
 manual.ingest(packet(100, 'manual'));
@@ -36,6 +39,8 @@ for (const time of [0, 101, 202, 249, 301, 403, 502, 603, 704, 802, 903]) jitter
 assert.equal(jitter.active.rows.length, 4, 'poll jitter does not halve the requested 4 Hz recording rate');
 jitter.ingest(packet(903, 'manual'));
 assert.equal(jitter.active.rows.length, 4, 'same bucket is not duplicated');
+jitter.ingest(packet(850, 'manual'));
+assert.equal(jitter.active.rows.length, 4, 'late same-boot packet is ignored instead of resetting the file');
 jitter.ingest(packet(3000, 'manual'));
 assert.equal(jitter.active.rows.length, 5, 'missing intervals are not fabricated');
 const limit = new C.Session();
@@ -62,6 +67,24 @@ assert.equal(changing.active.rows.length, 1);
 assert.equal(changing.ingest({...packet(310, 'manual'), interval_ms: 1000}).completed.length, 0);
 assert.equal(changing.active.rows.length, 1);
 console.log('PASS: configurable intervals, input rejection, interval change preserves previous session');
+
+const buffered = new C.Session();
+const exact = time => ({...packet(time, 'manual'), interval_ms:100, recording:true, recording_session:7});
+buffered.ingest(exact(100), '2026-09-08T12:00:00.100Z', true);
+buffered.ingest(exact(160), '2026-09-08T12:00:00.160Z', false);
+assert.equal(buffered.active.rows.length, 1, 'live preview sync is not stored as an off-cadence row');
+const bufferedStop = buffered.ingest({...exact(170), recording:false}, '2026-09-08T12:00:00.170Z', false);
+assert.equal(bufferedStop.completed[0].rows.length, 1, 'STOP saves firmware-buffered rows without an extra preview row');
+const previewOnly = new C.Session();
+previewOnly.ingest(exact(200), '2026-09-08T12:00:00.200Z', false);
+assert.equal(previewOnly.active, null, 'preview sync waits for the first firmware-timed sample');
+const longBuffered = new C.Session();
+for (let t = 100; t <= 113000; t += 100) {
+  longBuffered.ingest(exact(t), new Date(1757332800000 + t).toISOString(), true);
+  longBuffered.ingest(exact(t + 50), new Date(1757332800050 + t).toISOString(), false);
+}
+assert.equal(longBuffered.active.rows.length, 1130, '1:53 at 100 ms retains all 1,130 firmware-timed rows');
+console.log('PASS: firmware-buffered samples stay separate from live preview synchronization');
 
 assert.equal(C.DEVICES.length, 13);
 C.DEVICES.forEach(([id], i) => {

@@ -31,7 +31,7 @@ std::atomic<uint32_t> supplyGeneration{0};
 SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t stateMutex = nullptr;
 QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr;
-QueueHandle_t sensorCommands = nullptr, logQueue = nullptr;
+QueueHandle_t sensorCommands = nullptr, logQueue = nullptr, webRecords = nullptr;
 
 const char *resetReasonName(esp_reset_reason_t reason) {
   switch (reason) {
@@ -241,24 +241,34 @@ uint8_t imuIdentity = 0;
 uint8_t imuSample[14] = {};
 bool imuSampleValid = false;
 unsigned imuReadFailures = 0;
+// Use the widest MPU6050/MPU6500 ranges so a fast robot movement is less
+// likely to clip and create a visible gap in recorded attitude data.
+constexpr uint8_t IMU_GYRO_CONFIG = 0x18;  // +/-2000 degrees/s
+constexpr float IMU_GYRO_LSB_PER_DPS = 16.4f;
+constexpr uint8_t IMU_ACCEL_CONFIG = 0x18; // +/-16 g
+constexpr float IMU_ACCEL_LSB_PER_G = 2048.0f;
 float imuFilteredAccel[3] = {};
 bool imuFilterReady = false;
 uint32_t imuSampleUs = 0;
-float yawDeg = 0.0f, yawBias = 0.0f, yawSum = 0.0f;
+float yawDeg = 0.0f;
+float accelBias[3] = {}, gyroBias[3] = {};
+float accelCalibrationSum[3] = {}, gyroCalibrationSum[3] = {};
 float previousYawRate = 0.0f;
-unsigned yawCalibrationCount = 0;
+unsigned imuCalibrationCount = 0;
 uint32_t yawReference = 0;
-bool yawCalibrated = false, yawContinuous = false;
+bool imuCalibrated = false, yawContinuous = false;
 
 void updateIMU();
 
-void calibrateYaw() {
-  yawCalibrationCount = 0;
-  yawSum = 0.0f;
-  yawCalibrated = yawContinuous = false;
+void calibrateIMU() {
+  imuCalibrationCount = 0;
+  memset(accelCalibrationSum, 0, sizeof(accelCalibrationSum));
+  memset(gyroCalibrationSum, 0, sizeof(gyroCalibrationSum));
+  imuCalibrated = yawContinuous = false;
+  imuFilterReady = false;
   yawDeg = 0.0f;
   imuSampleUs = 0;
-  logLine("Yaw: keep board STILL for about 4 seconds to calibrate.");
+  logLine("IMU XYZ: keep robot LEVEL and STILL for about 4 seconds.");
 }
 
 const char *imuModel() {
@@ -845,14 +855,14 @@ bool initIMU() {
   delay(100);
 
   // Disable FIFO/internal I2C master.
-  // DLPF=3; sample rate=50 Hz.
-  // Gyro=+/-1000 dps; accelerometer=+/-8 g for vibration headroom.
+  // DLPF=3; sample rate=50 Hz. Wide ranges retain fast impacts/turns instead
+  // of clipping them; filtering below still keeps the displayed data stable.
   if (!write8(imuAddress, 0x6A, 0x00) ||
       !write8(imuAddress, 0x23, 0x00) ||
       !write8(imuAddress, 0x1A, 0x03) ||
       !write8(imuAddress, 0x19, 0x13) ||
-      !write8(imuAddress, 0x1B, 0x10) ||
-      !write8(imuAddress, 0x1C, 0x10)) {
+      !write8(imuAddress, 0x1B, IMU_GYRO_CONFIG) ||
+      !write8(imuAddress, 0x1C, IMU_ACCEL_CONFIG)) {
     logLine("IMU: configuration write ERROR");
     return false;
   }
@@ -883,18 +893,18 @@ bool initIMU() {
   }
 
   if (power != 0x01 ||
-      gyroConfig != 0x10 ||
-      accelConfig != 0x10) {
+      gyroConfig != IMU_GYRO_CONFIG ||
+      accelConfig != IMU_ACCEL_CONFIG) {
     logf("IMU: configuration MISMATCH: PWR=0x%02X "
-                  "GYRO=0x%02X ACCEL=0x%02X; expected 01/10/10\n",
-                  power, gyroConfig, accelConfig);
+                  "GYRO=0x%02X ACCEL=0x%02X; expected 01/%02X/%02X\n",
+                  power, gyroConfig, accelConfig, IMU_GYRO_CONFIG, IMU_ACCEL_CONFIG);
     return false;
   }
 
   delay(100);
 
   imuReady = true;
-  calibrateYaw();
+  calibrateIMU();
   logf("%s [0x%02X]: READY\n", imuModel(), imuAddress);
   return true;
 }
@@ -919,51 +929,68 @@ void updateIMU() {
   imuSampleUs = now;
   imuSampleValid = true;
   imuReadFailures = 0;
+  float rawAccel[3], rawGyro[3];
+  for (unsigned i = 0; i < 3; ++i) {
+    rawAccel[i] = signed16(&imuSample[i * 2]) / IMU_ACCEL_LSB_PER_G;
+    rawGyro[i] = signed16(&imuSample[8 + i * 2]) / IMU_GYRO_LSB_PER_DPS;
+  }
   // 50 ms low-pass for displayed acceleration/tilt, using actual sample time.
   const float alpha = dt > 0 ? dt / (0.05f + dt) : 1.0f;
   for (unsigned i = 0; i < 3; ++i) {
-    const float raw = signed16(&imuSample[i * 2]) / 4096.0f;
-    if (!imuFilterReady || dt > 0.1f) imuFilteredAccel[i] = raw;
-    else imuFilteredAccel[i] += alpha * (raw - imuFilteredAccel[i]);
+    const float corrected = rawAccel[i] - (imuCalibrated ? accelBias[i] : 0.0f);
+    if (!imuFilterReady || dt > 0.1f) imuFilteredAccel[i] = corrected;
+    else imuFilteredAccel[i] += alpha * (corrected - imuFilteredAccel[i]);
   }
   imuFilterReady = true;
 
-  const float ax = signed16(&imuSample[0]) / 4096.0f;
-  const float ay = signed16(&imuSample[2]) / 4096.0f;
-  const float az = signed16(&imuSample[4]) / 4096.0f;
-  const float gz = signed16(&imuSample[12]) / 32.8f;
-
-  if (!yawCalibrated) {
-    // Calibrate exactly once from the first 200 valid samples. Do not gate on
-    // the absolute gyro value: inexpensive modules can have more than 5 dps of
-    // zero-rate offset, which previously left calibration stuck at 0/200.
-    // The operator must keep the board still during this four-second window.
-    yawSum += gz;
-    if (++yawCalibrationCount >= 200) {
-      const float mean = yawSum / yawCalibrationCount;
-      yawBias = mean;
+  if (!imuCalibrated) {
+    // One stationary, level calibration measures zero-rate gyro bias on X/Y/Z
+    // and accelerometer offsets on X/Y/Z (Z retains the expected +1 g gravity).
+    for (unsigned i = 0; i < 3; ++i) {
+      accelCalibrationSum[i] += rawAccel[i];
+      gyroCalibrationSum[i] += rawGyro[i];
+    }
+    if (++imuCalibrationCount >= 200) {
+      for (unsigned i = 0; i < 3; ++i) {
+        gyroBias[i] = gyroCalibrationSum[i] / imuCalibrationCount;
+        accelBias[i] = accelCalibrationSum[i] / imuCalibrationCount;
+      }
+      accelBias[2] -= 1.0f;
+      for (unsigned i = 0; i < 3; ++i)
+        imuFilteredAccel[i] = rawAccel[i] - accelBias[i];
       ++yawReference;
       yawDeg = 0;
-      previousYawRate = gz - yawBias;
-      yawCalibrated = yawContinuous = true;
-      logf("Yaw calibrated: Z bias=%+.4f dps; zero set; reference=%lu.\n",
-           yawBias, (unsigned long)yawReference);
+      previousYawRate = rawGyro[2] - gyroBias[2];
+      imuCalibrated = yawContinuous = true;
+      logf("IMU XYZ calibrated: accel bias=%+.4f/%+.4f/%+.4f g; "
+           "gyro bias=%+.4f/%+.4f/%+.4f dps; reference=%lu.\n",
+           accelBias[0], accelBias[1], accelBias[2],
+           gyroBias[0], gyroBias[1], gyroBias[2], (unsigned long)yawReference);
     }
     return;
   }
 
-  const float rate = gz - yawBias;
-  if (dt > 0.1f || abs(int(signed16(&imuSample[12]))) >= 32760) {
+  const float rate = rawGyro[2] - gyroBias[2];
+  const bool gyroClipped = abs(int(signed16(&imuSample[12]))) >= 32760;
+  if (dt > 0.1f || gyroClipped) {
     // Skip an interval whose rotation is unknown, but retain the one startup
     // calibration and current relative yaw. Manual 'c' remains available when
     // the user explicitly wants to establish a new gyro bias.
     previousYawRate = rate;
-    logLine("Yaw: sample gap / gyro clipping; interval skipped");
+    // Avoid flooding the diagnostics queue during sustained vibration. UART
+    // output shares the web core and excessive messages can delay web logging.
+    static uint32_t lastSkipLogMs = 0;
+    const uint32_t nowMs = millis();
+    if (uint32_t(nowMs - lastSkipLogMs) >= 1000) {
+      lastSkipLogMs = nowMs;
+      logLine(gyroClipped ? "Yaw: gyro clipped; one interval skipped" :
+                            "Yaw: sample gap; one interval skipped");
+    }
     return;
   }
   if (yawContinuous && dt > 0) {
     yawDeg += 0.5f * (previousYawRate + rate) * dt;
-    if (!isfinite(yawDeg)) { calibrateYaw(); return; }
+    if (!isfinite(yawDeg)) { calibrateIMU(); return; }
     yawDeg = fmodf(yawDeg + 180.0f, 360.0f);
     if (yawDeg < 0) yawDeg += 360.0f;
     yawDeg -= 180.0f;
@@ -978,8 +1005,8 @@ void publishIMU() {
   ImuReading value;
   value.valid = imuReady && imuSampleValid;
   value.identity = imuIdentity;
-  value.calibrating = !yawCalibrated;
-  value.calibrationSamples = yawCalibrationCount;
+  value.calibrating = !imuCalibrated;
+  value.calibrationSamples = imuCalibrationCount;
   value.yawReference = yawReference;
   value.updatedMs = millis();
   if (value.valid) {
@@ -999,7 +1026,7 @@ void publishIMU() {
     value.rollValid = value.tiltValid && yz >= 0.02f;
     value.rollDeg = atan2f(ay, az) * 57.2957795f;
     value.pitchDeg = atan2f(-ax, yz) * 57.2957795f;
-    value.yawValid = yawCalibrated && yawContinuous;
+    value.yawValid = imuCalibrated && yawContinuous;
     value.yawDeg = yawDeg;
   }
   Lock lock(stateMutex);
@@ -1022,7 +1049,7 @@ void printHelp() {
   logLine("i : Diagnose and reinitialize only MPU6050 / MPU6500");
   logLine("r : Reinitialize sensors and MCP; outputs OFF");
   logLine("h : Show commands");
-  logLine("c : Calibrate yaw gyro bias; keep board still");
+  logLine("c : Calibrate accelerometer + gyroscope XYZ; keep robot level/still");
   logLine("z : Set relative yaw to zero while board is still");
 }
 
@@ -1102,11 +1129,11 @@ void imuTask(void *) {
         { Lock lock(stateMutex); dashboard.imu.valid = false; }
         initIMU();
         lastRetry = millis();
-      } else if (command == 'c' && imuReady) calibrateYaw();
-      else if (command == 'z' && imuReady && yawCalibrated) {
+      } else if (command == 'c' && imuReady) calibrateIMU();
+      else if (command == 'z' && imuReady && imuCalibrated) {
         yawDeg = 0; ++yawReference; yawContinuous = true; imuSampleUs = 0;
         logLine("Yaw zero set; relative body Z");
-      } else logLine("Yaw: IMU not ready or calibration incomplete");
+      } else logLine("IMU: not ready or XYZ calibration incomplete");
     }
     if (!imuReady && millis() - lastRetry >= 3000) {
       initIMU();
@@ -1363,10 +1390,10 @@ void printDashboard() {
     else Serial.print("Roll=UNDEFINED ");
     Serial.printf("Pitch=%+.2f deg\n", imu.pitchDeg);
   } else Serial.println("Tilt: INVALID (acceleration outside range)");
-  if (imu.calibrating) Serial.printf("Yaw: CALIBRATING %u/200; still\n", imu.calibrationSamples);
+  if (imu.calibrating) Serial.printf("IMU XYZ: CALIBRATING %u/200; level and still\n", imu.calibrationSamples);
   else if (imu.yawValid) Serial.printf("Yaw=%+.2f deg (relative Z; reference=%lu; body Z)\n",
                                       imu.yawDeg, (unsigned long)imu.yawReference);
-  else Serial.println("Yaw: INVALID; keep still to recalibrate");
+  else Serial.println("IMU/Yaw: INVALID; keep level and still to recalibrate");
 }
 
 
@@ -1376,7 +1403,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260909-ds-separate-ga-hz-1";
+constexpr const char *FIRMWARE_BUILD = "20260912-buffered-log-imu-xyz-1";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1421,6 +1448,7 @@ struct LogRecord {
 };
 QueueHandle_t sdRecords = nullptr;
 std::atomic<uint32_t> sdDropped{0}, sdWritten{0};
+std::atomic<uint32_t> webRecordDropped{0};
 std::atomic<bool> sdMounted{false};
 std::atomic<const char *> sdStatus{"WAITING_FOR_START"};
 std::atomic<uint32_t> sdCardMiB{0};
@@ -1519,7 +1547,9 @@ void logCaptureTask(void *) {
     const uint32_t token = recordingToken.load(), now = millis();
     const uint32_t requested = logIntervalMs.load();
     if (token != previousToken || requested != interval) {
-      previousToken = token; interval = requested; lastCapture = now;
+      // A new recording session or interval creates a new logical CSV file.
+      // Its first captured row must always be sequence 1.
+      previousToken = token; interval = requested; lastCapture = now; sequence = 0;
     }
     if (!(token & 1) || uint32_t(now - lastCapture) < interval) continue;
     lastCapture += (uint32_t(now - lastCapture) / interval) * interval;
@@ -1532,6 +1562,17 @@ void logCaptureTask(void *) {
     record.supplyEnabled = supplyBusEnabled.load();
     if (recordingToken.load() != token) continue;
     if (ENABLE_SD_LOGGING && deviceEnabled(DEV_SD) && xQueueSend(sdRecords, &record, 0) != pdTRUE) sdDropped.fetch_add(1);
+    // Browser rendering/network timing must not define the recording cadence.
+    // Keep exact firmware-timed samples until /api/state collects them.
+    if (xQueueSend(webRecords, &record, 0) != pdTRUE) {
+      LogRecord oldest;
+      if (xQueueReceive(webRecords, &oldest, 0) == pdTRUE &&
+          xQueueSend(webRecords, &record, 0) == pdTRUE) {
+        webRecordDropped.fetch_add(1);
+      } else {
+        webRecordDropped.fetch_add(1);
+      }
+    }
   }
 }
 
@@ -1860,12 +1901,14 @@ void sdWriterTask(void *) {
   uint32_t nextAttempt = 0;
   unsigned session = 1;
   uint32_t activeRecordingSession = 0;
+  uint32_t activeInterval = 0, fileSequence = 0;
   for (;;) {
     LogRecord record;
     if (xQueueReceive(sdRecords, &record, pdMS_TO_TICKS(200)) != pdTRUE) continue;
     if (!deviceEnabled(DEV_SD)) continue;
-    if (record.recordingSession != activeRecordingSession) {
+    if (record.recordingSession != activeRecordingSession || record.intervalMs != activeInterval) {
       activeRecordingSession = record.recordingSession;
+      activeInterval = record.intervalMs;
       mounted = false; sdMounted.store(false); nextAttempt = 0;
     }
     if (!mounted) {
@@ -1899,8 +1942,10 @@ void sdWriterTask(void *) {
         continue;
       }
       sdStatus.store("READY");
+      fileSequence = 0;
       logf("SD: recording %s; interval=%lu ms\n", path, (unsigned long)record.intervalMs);
     }
+    record.sequence = ++fileSequence;
     String line = csvRow(record);
     File file = SD.open(path, FILE_APPEND);
     bool ok = file && file.print(line) == line.length();
@@ -2141,6 +2186,30 @@ void wifiTask(void *) {
     server.send_P(200, "text/html; charset=utf-8", reinterpret_cast<const char *>(DASHBOARD_GZIP), sizeof(DASHBOARD_GZIP));
   });
   server.on("/api/state", HTTP_GET, [&]() {
+    String header = csvHeader(); header.trim();
+    String recorded = "[";
+    LogRecord buffered;
+    for (unsigned delivered = 0;
+         delivered < 8 && xQueueReceive(webRecords, &buffered, 0) == pdTRUE;
+         ++delivered) {
+      if (delivered) recorded += ",";
+      String bufferedRow = csvRow(buffered); bufferedRow.trim();
+      const auto &bufferedPower = buffered.state.supply12v;
+      const bool bufferedKnown = fresh(bufferedPower.valid, buffered.capturedMs,
+                                       bufferedPower.updatedMs, 1000);
+      const char *bufferedSupply = !SUPPLY_MONITOR_ENABLED ? "manual" :
+        bufferedKnown ? (bufferedPower.present ? "on" : "off") : "unknown";
+      recorded += "{\"captured_ms\":" + String(buffered.capturedMs);
+      recorded += ",\"recording_session\":" + String(buffered.recordingSession);
+      recorded += ",\"interval_ms\":" + String(buffered.intervalMs);
+      recorded += ",\"devices_mask\":" + String(buffered.devicesMask);
+      recorded += ",\"supply\":\"" + String(bufferedSupply) + "\"";
+      recorded += ",\"csv\":\"" + bufferedRow + "\"}";
+    }
+    recorded += "]";
+    const unsigned recordBufferPending = uxQueueMessagesWaiting(webRecords);
+    // Capture the live preview after draining buffered records. This guarantees
+    // its uptime cannot precede a sample returned in the same response.
     LogRecord record;
     record.state = getDashboardSnapshot();
     record.capturedMs = millis();
@@ -2148,11 +2217,10 @@ void wifiTask(void *) {
     record.supplyEnabled = supplyBusEnabled.load();
     const auto &power = record.state.supply12v;
     const bool known = fresh(power.valid, record.capturedMs, power.updatedMs, 1000);
-    String header = csvHeader(); header.trim();
     String row = csvRow(record); row.trim();
     // Header and row contain only fixed field names, numeric fields and RTC
     // digits/separators, never user input or quotes.
-    String json; json.reserve(header.length() + row.length() + 800);
+    String json; json.reserve(header.length() + row.length() + recorded.length() + 1000);
     json = "{\"boot\":\"" + bootId + "\",\"supply\":\"";
     json += !SUPPLY_MONITOR_ENABLED ? "manual" : known ? (power.present ? "on" : "off") : "unknown";
     json += "\",\"interval_ms\":" + String(record.intervalMs) + ",\"header\":\"" + header + "\",\"csv\":\"" + row + "\",\"devices_mask\":" + String(enabledDevices.load()) + ",\"control_revision\":" + String(deviceControlRevision);
@@ -2169,6 +2237,9 @@ void wifiTask(void *) {
     json += ",\"sd_card_mib\":" + String(sdCardMiB.load());
     json += ",\"sd_written\":" + String(sdWritten.load());
     json += ",\"sd_dropped\":" + String(sdDropped.load());
+    json += ",\"record_samples\":" + recorded;
+    json += ",\"record_buffer_pending\":" + String(recordBufferPending);
+    json += ",\"record_buffer_dropped\":" + String(webRecordDropped.load());
     json += ",\"blink_ms\":" + String(debugBlinkMs.load());
     json += ",\"shunt_mohm\":[" + String(shunts.mohm[0], 4) + "," + String(shunts.mohm[1], 4) + "," + String(shunts.mohm[2], 4) + "]";
     const auto &mcp = record.state.mcp;
@@ -2326,8 +2397,12 @@ void setup() {
   // Device owners initialize only after the supply gate opens.
   // ESP-IDF task stack sizes are in bytes. Start console last.
   sdRecords = xQueueCreate(12, sizeof(LogRecord));
-  if (!sdRecords) {
-    Serial.println("FATAL: SD record queue allocation failed");
+  // 32 samples retain 3.2 seconds at the fastest supported 100 ms interval.
+  // The API drains up to eight on every response, so normal Wi-Fi jitter does
+  // not remove rows from the browser CSV.
+  webRecords = xQueueCreate(32, sizeof(LogRecord));
+  if (!sdRecords || !webRecords) {
+    Serial.println("FATAL: record queue allocation failed");
     while (true) delay(1000);
   }
   TaskHandle_t handles[12] = {};
@@ -2340,10 +2415,14 @@ void setup() {
   if (ok) ok = xTaskCreatePinnedToCore(dhtTask, "dht", 3072, nullptr, 1, &handles[10], SENSOR_CORE) == pdPASS;
   if (ok) ok = xTaskCreatePinnedToCore(temperatureTask, "temperature", 4096, nullptr, 1, &handles[5], SENSOR_CORE) == pdPASS;
   if (ok) ok = xTaskCreatePinnedToCore(recordingControlTask, "recordControl", 3072, nullptr, 2, &handles[11], SENSOR_CORE) == pdPASS;
-  if (ok) ok = xTaskCreatePinnedToCore(logCaptureTask, "logCapture", 4096, nullptr, 2, &handles[6], SENSOR_CORE) == pdPASS;
+  // Recording snapshots share IMU priority so a busy sensor cycle cannot
+  // postpone the requested capture interval.
+  if (ok) ok = xTaskCreatePinnedToCore(logCaptureTask, "logCapture", 4096, nullptr, 3, &handles[6], SENSOR_CORE) == pdPASS;
   if (ok && ENABLE_SD_LOGGING) ok = xTaskCreatePinnedToCore(sdWriterTask, "sdWriter", 8192, nullptr, 1, &handles[7], WEB_CORE) == pdPASS;
   if (ok) ok = xTaskCreatePinnedToCore(encoderTask, "encoder", 4096, nullptr, 2, &handles[8], SENSOR_CORE) == pdPASS;
-  if (ok) ok = xTaskCreatePinnedToCore(wifiTask, "wifiWeb", 12288, nullptr, 1, &handles[9], WEB_CORE) == pdPASS;
+  // Keep API polling ahead of SD/console work; browser recording depends on
+  // receiving each state response on time.
+  if (ok) ok = xTaskCreatePinnedToCore(wifiTask, "wifiWeb", 12288, nullptr, 2, &handles[9], WEB_CORE) == pdPASS;
   if (ok) ok = xTaskCreatePinnedToCore(consoleTask, "console", 6144, nullptr, 1, &handles[3], WEB_CORE) == pdPASS;
   if (!ok) {
     Serial.println("FATAL: task creation failed; restarting");

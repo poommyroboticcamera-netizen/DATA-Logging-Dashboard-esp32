@@ -27,6 +27,11 @@ const DashboardCore = (() => {
     if (!Number.isInteger(ms) || ms < 100 || ms > 60000) throw Error('กรอกจำนวนเต็ม 100–60000 ms');
     return ms;
   }
+  function canSyncPreview(liveUptime, newestBufferedUptime, pending) {
+    const live = Number(liveUptime), newest = Number(newestBufferedUptime);
+    return Number(pending) === 0 && Number.isFinite(live) &&
+      (newestBufferedUptime == null || (Number.isFinite(newest) && live >= newest));
+  }
   function parse(packet) {
     if (!packet || typeof packet.header !== 'string' || typeof packet.csv !== 'string') throw Error('รูปแบบข้อมูลไม่ถูกต้อง');
     const keys = packet.header.trim().split(',');
@@ -71,10 +76,15 @@ const DashboardCore = (() => {
       this.active = null; this.lastSample = null;
       return result;
     }
-    ingest(packet, stamp = new Date().toISOString()) {
+    ingest(packet, stamp = new Date().toISOString(), storeSample = true) {
       const p = parse(packet), completed = [];
       const uptime = Number(p.data.uptime_ms);
-      const reset = this.lastUptime !== null && (uptime < this.lastUptime || p.boot !== this.boot);
+      const bootChanged = this.boot !== null && p.boot !== this.boot;
+      // Network/buffer races can deliver an older preview after a newer exact
+      // sample. Ignore it; only a changed boot ID proves an ESP32 restart.
+      if (this.lastUptime !== null && uptime < this.lastUptime && !bootChanged)
+        return { parsed: p, completed, changed: false, ignored: true };
+      const reset = bootChanged;
       if (reset || (this.active && this.active.keys.join(',') !== p.keys.join(','))) {
         const done = this.finish(reset ? 'device_reset' : 'schema_change');
         if (done) completed.push(done);
@@ -90,16 +100,16 @@ const DashboardCore = (() => {
       }
       if (!p.recording) return { parsed: p, completed, changed: completed.length > 0 };
       // Manual supply monitoring is independent of the recording switch.
-      if (['on', 'manual'].includes(p.supply) && !this.active) {
+      if (storeSample && ['on', 'manual'].includes(p.supply) && !this.active) {
         this.active = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), started: stamp, keys: p.keys, recordingSession: p.recordingSession, intervalMs: p.intervalMs, rows: [] };
         this.lastSample = null;
       }
       let added = false;
-      if (this.active && (this.lastSample === null || Math.floor(uptime / p.intervalMs) > Math.floor(this.lastSample / p.intervalMs))) {
+      if (storeSample && this.active && (this.lastSample === null || Math.floor(uptime / p.intervalMs) > Math.floor(this.lastSample / p.intervalMs))) {
         this.active.rows.push([stamp, p.supply, ...p.values]); this.lastSample = uptime; added = true;
       }
       if (p.supply === 'off' && this.active) {
-        if (!added) this.active.rows.push([stamp, p.supply, ...p.values]);
+        if (storeSample && !added) this.active.rows.push([stamp, p.supply, ...p.values]);
         const done = this.finish('supply_off'); if (done) completed.push(done);
       } else if (this.active?.rows.length >= MAX_SESSION_ROWS) {
         const done = this.finish('record_limit'); if (done) completed.push(done);
@@ -107,6 +117,6 @@ const DashboardCore = (() => {
       return { parsed: p, completed, changed: added || completed.length > 0 };
     }
   }
-  return { shuntSettings, gauge, ControlState, DEVICES, enabled, encoderSettings, interval, parse, number, csv, Session, SAMPLE_INTERVAL_MS, MAX_SESSION_ROWS };
+  return { shuntSettings, gauge, ControlState, DEVICES, enabled, encoderSettings, interval, canSyncPreview, parse, number, csv, Session, SAMPLE_INTERVAL_MS, MAX_SESSION_ROWS };
 })();
 if (typeof module !== 'undefined') module.exports = DashboardCore;

@@ -12,6 +12,8 @@
   let ledDirty = false, ledBusy = false, sdAvailable = true;
   let currentInterval = 250, intervalDirty = false, settingsBusy = false;
   let persistedSession = null, persistedRows = 0;
+  let storageQueue = Promise.resolve(), visualTimer = 0, visualStale = false, lastVisualMs = 0;
+  let recordBufferDropped = 0, recordBufferBoot = '';
   const fmt = (value, digits = 2) => value === null ? '—' : value.toFixed(digits);
   function alert(text) { $('alert').hidden = !text; $('alert').textContent = text; }
   function database() {
@@ -43,6 +45,11 @@
       tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
     });
   }
+  function queueStorage(operation) {
+    const queued = storageQueue.then(operation);
+    storageQueue = queued.catch(() => {});
+    return queued;
+  }
   function allRecords() {
     return new Promise((resolve, reject) => {
       const req = db.transaction('records').objectStore('records').getAll();
@@ -57,12 +64,12 @@
   }
   function deleteFile(record) {
     if (!db) return Promise.resolve();
-    return new Promise((resolve, reject) => {
+    return queueStorage(() => new Promise((resolve, reject) => {
       const tx = db.transaction('records', 'readwrite');
       tx.objectStore('records').delete(record.id);
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
-    });
+    }));
   }
   function renderFiles() {
     $('files').replaceChildren();
@@ -96,7 +103,7 @@
     if (session.active) records.push({ id: 'active', kind: 'active', session: session.active });
     // Keep finished files available in memory even if browser storage is full.
     if (completed.length) { files.unshift(...completed); renderFiles(); }
-    try { await writeRecords(records, !session.active); }
+    try { await queueStorage(() => writeRecords(records, !session.active)); }
     catch { alert('พื้นที่สำรองในเบราว์เซอร์ไม่พร้อม กรุณากดบันทึก CSV และเก็บหน้านี้เปิดไว้'); }
     for (const record of completed) {
       $('save-note').textContent = `เซฟแล้ว ${record.rows.length} แถว · ${reasons[record.reason] || record.reason}`;
@@ -156,7 +163,7 @@
     $('roll').textContent = fmt(valid('roll_valid') ? n('roll_deg') : null, 1);
     $('pitch').textContent = fmt(valid('tilt_valid') ? n('pitch_deg') : null, 1);
     $('yaw').textContent = fmt(valid('yaw_valid') ? n('yaw_deg') : null, 1);
-    $('yaw-note').textContent = stale ? 'ขาดการเชื่อมต่อ' : !valid('imu_valid') ? 'IMU ไม่พร้อม / หยุดอ่าน / ข้อมูลเก่า' : valid('yaw_calibrating') ? 'ให้บอร์ดอยู่นิ่ง · คาลิเบรต ' + (n('yaw_calibration_samples') ?? 0) + '/200' : valid('yaw_valid') ? 'มุมหมุนรอบแกน Z · รอบอ้างอิง ' + (n('yaw_reference') ?? '—') : 'Yaw ไม่พร้อม · อยู่นิ่งเพื่อเริ่มอ้างอิงใหม่';
+    $('yaw-note').textContent = stale ? 'ขาดการเชื่อมต่อ' : !valid('imu_valid') ? 'IMU ไม่พร้อม / หยุดอ่าน / ข้อมูลเก่า' : valid('yaw_calibrating') ? 'วางหุ่นให้อยู่ระดับและนิ่ง · คาลิเบรต Accel + Gyro XYZ ' + (n('yaw_calibration_samples') ?? 0) + '/200' : valid('yaw_valid') ? 'IMU XYZ พร้อม · Yaw รอบอ้างอิง ' + (n('yaw_reference') ?? '—') : 'IMU ยังไม่พร้อม · วางหุ่นให้อยู่ระดับและนิ่งเพื่อคาลิเบรต';
     $('dht-note').textContent = stale ? 'ขาดการเชื่อมต่อ' : supply === 'off' || supply === 'unknown' ? 'หยุดอ่าน / รอยืนยันซัพพลาย' : valid('dht22_valid') ? 'DHT22 · GPIO4 · อ่านทุก 2 วินาที' : 'DHT22 กำลังเริ่มทำงานหรืออ่านไม่สำเร็จ · ดู Serial Monitor';
     $('imu-pill').textContent = valid('imu_valid') ? 'ออนไลน์' : 'ไม่พร้อม'; $('imu-pill').className = 'pill' + (valid('imu_valid') ? ' on' : '');
     for (let i = 1; i <= 3; i++) {
@@ -195,6 +202,19 @@
       }); ctx.stroke();
     }
     if (!chartPoints.length) { ctx.fillStyle = '#92a4b8'; ctx.textAlign = 'center'; ctx.fillText('รอข้อมูลความเร่งจากบอร์ด', w / 2, h / 2); ctx.textAlign = 'left'; }
+  }
+  // Visual work is intentionally capped at 10 FPS. Acquisition and IndexedDB
+  // writes run first, so a large IMU pose change may make the model lag without
+  // moving the requested recording cadence.
+  function scheduleVisuals(stale = false) {
+    visualStale = stale;
+    if (visualTimer) return;
+    const wait = Math.max(0, 100 - (performance.now() - lastVisualMs));
+    visualTimer = setTimeout(() => {
+      visualTimer = 0; lastVisualMs = performance.now();
+      if (latest) render(latest.data, visualStale ? 'unknown' : latest.supply, visualStale);
+      recordingUI(); graph();
+    }, wait);
   }
   async function controlPost(path, values) {
     const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Dashboard-Request': '1' }, body: new URLSearchParams(values), signal: AbortSignal.timeout(5000) });
@@ -241,6 +261,27 @@
     $('encoder-apply').disabled = !online || controlsBusy;
     $('shunt-apply').disabled = !online || controlsBusy;
   }
+  function ingestState(packet) {
+    if (!Array.isArray(packet.record_samples)) return session.ingest(packet);
+    const parsed = C.parse(packet), completed = [];
+    const receivedAt = Date.now(), liveUptime = Number(parsed.data.uptime_ms);
+    let changed = false, newestBufferedUptime = null;
+    const merge = result => { completed.push(...result.completed); changed ||= result.changed; };
+    for (const sample of packet.record_samples) {
+      const captured = Number(sample?.captured_ms);
+      if (!Number.isFinite(captured) || typeof sample?.csv !== 'string') throw Error('บัฟเฟอร์ข้อมูลบันทึกไม่ถูกต้อง');
+      newestBufferedUptime = newestBufferedUptime == null ? captured : Math.max(newestBufferedUptime, captured);
+      const age = Math.max(0, liveUptime - captured);
+      const stamp = new Date(receivedAt - age).toISOString();
+      merge(session.ingest({ ...packet, ...sample, header: packet.header, recording: true }, stamp, true));
+    }
+    // Do not advance past samples that remain in the firmware queue. Once the
+    // queue is empty, synchronize STOP/restart without storing the live preview
+    // as an extra off-cadence row.
+    if (C.canSyncPreview(liveUptime, newestBufferedUptime, packet.record_buffer_pending))
+      merge(session.ingest(packet, new Date(receivedAt).toISOString(), false));
+    return { parsed, completed, changed };
+  }
   async function poll() {
     if (requestBusy) return;
     requestBusy = true;
@@ -251,6 +292,14 @@
       const body = await response.text();
       responseReceived = true; // Complete body received; timeout is not a schema error.
       const packet = JSON.parse(body);
+      if (packet.boot && packet.boot !== recordBufferBoot) {
+        recordBufferBoot = packet.boot; recordBufferDropped = 0;
+      }
+      const dropped = Number(packet.record_buffer_dropped);
+      if (Number.isInteger(dropped) && dropped > recordBufferDropped) {
+        alert(`บัฟเฟอร์บันทึกเต็ม · ขาดข้อมูล ${dropped - recordBufferDropped} แถว เพราะหน้าเว็บไม่ได้รับข้อมูลนานเกินไป`);
+        recordBufferDropped = dropped;
+      }
       sdAvailable = packet.sd_available !== false;
       if (Array.isArray(packet.ds_rom)) packet.ds_rom.forEach((rom,i) => {
         const label = $('ds' + (i+1) + '-rom');
@@ -260,7 +309,7 @@
       if (packet.control_revision != null) {
         if (!deviceState.accept(packet)) return;
       } else if (deviceState.boot) return;
-      const result = session.ingest(packet);
+      const result = ingestState(packet);
       currentInterval = result.parsed.intervalMs;
       if (Number.isInteger(packet.ga_step_ms)) {
         const hz = 1000 / packet.ga_step_ms;
@@ -292,20 +341,24 @@
         $('shunt-config-note').textContent = 'บอร์ดใช้ CH1 / CH2 / CH3: ' + packet.shunt_mohm.join(' / ') + ' mΩ';
       }
       renderControls();
-      render(latest.data, latest.supply);
       const uptime = latest.data.uptime_ms;
       if (uptime !== lastChartUptime) {
         chartPoints.push({ time: Date.now(), values: ['imu_ax_ms2', 'imu_ay_ms2', 'imu_az_ms2'].map(key => C.number(latest.data, key)) });
         lastChartUptime = uptime;
       }
       chartPoints = chartPoints.filter(p => p.time > Date.now() - 60000);
-      if (result.changed) await persist(result.completed);
+      // Incremental browser backup is serialized but does not hold the next
+      // sensor request. A completed session still waits until it is durable.
+      if (result.changed) {
+        const saving = persist(result.completed);
+        if (result.completed.length) await saving;
+      }
       if (packet.power_note) { $('power-note').textContent = packet.power_note; }
     } catch (error) {
       renderControls();
       const age = Date.now() - lastSuccess;
       $('link-dot').className = ''; $('link-text').textContent = received ? 'รอเชื่อมต่อกลับ' : 'ยังไม่พบข้อมูล';
-      if (received && age > 2500) render(latest?.data, 'unknown', true);
+      if (received && age > 2500) scheduleVisuals(true);
       if (received && age > 6000 && !lostSaved) {
         lostSaved = true; const done = session.finish('connection_lost');
         if (done) await persist([done]);
@@ -316,7 +369,7 @@
       }
       else if (responseReceived) alert('ข้อมูลจากบอร์ดไม่ถูกต้อง: ' + error.message + ' · ตรวจว่าเฟิร์มแวร์กับหน้าเว็บเป็นรุ่นเดียวกัน');
       else if (!received) alert('กำลังรอ ESP32: ตรวจว่าอัปโหลดเฟิร์มแวร์ล่าสุดและใช้งาน Wi-Fi เครือข่ายเดียวกัน');
-    } finally { recordingUI(); graph(); requestBusy = false; }
+    } finally { requestBusy = false; scheduleVisuals(received && Date.now() - lastSuccess > 2500); }
   }
   async function init() {
     for (let i = 1; i <= 3; i++) {
@@ -325,10 +378,10 @@
     $('imu-calibrate').onclick = async () => {
       if (controlsBusy) return;
       controlsBusy = true; renderControls();
-      $('yaw-note').textContent = 'กำลังเริ่มคาลิเบรต · วางบอร์ดให้นิ่ง';
+      $('yaw-note').textContent = 'กำลังเริ่มคาลิเบรต Accel + Gyro XYZ · วางหุ่นให้อยู่ระดับและนิ่ง';
       try {
         await controlPost('/api/imu', { action: 'calibrate' });
-        $('yaw-note').textContent = 'วางบอร์ดให้นิ่ง · รอคาลิเบรต 0/200';
+        $('yaw-note').textContent = 'วางหุ่นให้อยู่ระดับและนิ่ง · รอคาลิเบรต XYZ 0/200';
       } catch (error) {
         $('yaw-note').textContent = 'เริ่มคาลิเบรตไม่สำเร็จ: ' + error.message;
       } finally {
@@ -431,12 +484,18 @@
     navLinks.forEach(link => link.addEventListener('click', () => {
       navLinks.forEach(item => { item.classList.toggle('active', item === link); if (item === link) item.setAttribute('aria-current', 'location'); else item.removeAttribute('aria-current'); });
     }));
-    window.addEventListener('resize', graph);
+    window.addEventListener('resize', () => scheduleVisuals(false));
     window.addEventListener('beforeunload', event => { if (session.active?.rows.length) { event.preventDefault(); event.returnValue = ''; } });
-    // One outstanding request; slow down for long recording intervals.
+    // Poll from an absolute deadline so visual/storage delays do not accumulate
+    // from one request to the next. Only one HTTP request is outstanding.
+    let nextPollAt = performance.now();
     async function pollNext() {
       await poll();
-      setTimeout(pollNext, Math.min(250, Math.max(100, currentInterval / 2)));
+      const period = Math.min(100, Math.max(50, currentInterval / 3));
+      const now = performance.now();
+      if (nextPollAt < now - period) nextPollAt = now;
+      nextPollAt += period;
+      setTimeout(pollNext, Math.max(0, nextPollAt - performance.now()));
     }
     pollNext();
     setInterval(recordingTime, 1000);
