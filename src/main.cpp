@@ -30,7 +30,7 @@ std::atomic<bool> supplyBusEnabled{false};
 std::atomic<uint32_t> supplyGeneration{0};
 SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t stateMutex = nullptr;
-QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr;
+QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr, recordingCommands = nullptr;
 QueueHandle_t sensorCommands = nullptr, logQueue = nullptr, webRecords = nullptr;
 
 const char *resetReasonName(esp_reset_reason_t reason) {
@@ -1403,7 +1403,7 @@ constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
 // Bit 0 = recording; remaining bits identify each physical START session.
 // Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260912-buffered-log-imu-xyz-1";
+constexpr const char *FIRMWARE_BUILD = "20260914-web-record-power-csv-1";
 std::atomic<uint32_t> recordingToken{0};
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
@@ -1539,6 +1539,81 @@ String csvRow(const LogRecord &record) {
   return line;
 }
 
+// Compact operator-facing CSV. INA index mapping follows the installed board:
+// 0x44 = Battery, 0x45 = Rotary, 0x40 = Camera.
+String compactCsvHeader() {
+  String text = "sequence,uptime_ms,rtc_datetime,rtc_valid,rtc_age_ms,date/time,";
+  text += "Vbat,Ibat,Vrotary,Irotary,Vcamera,Icamera,Iwheel,RPMencoder,";
+  text += "dht22_temp_c,dht22_humidity_pct,dht22_valid,dht22_age_ms,";
+  for (unsigned i = 1; i <= 4; i++) {
+    String prefix = "ds" + String(i);
+    text += prefix + "_temp_c," + prefix + "_valid," + prefix + "_age_ms," + prefix + "_status,";
+  }
+  text += "imu_ax_ms2,imu_ay_ms2,imu_az_ms2,imu_temp_c,roll_deg,pitch_deg,yaw_deg,";
+  text += "imu_valid,tilt_valid,roll_valid,yaw_valid,imu_age_ms,";
+  text += "encoder_count,encoder_counts_s,shaft_rpm,wheel_rpm,speed_kmh,";
+  text += "encoder_valid,rpm_valid,speed_valid,encoder_age_ms,dropped_records,";
+  text += "yaw_calibrating,yaw_calibration_samples,yaw_reference,record_interval_ms,enabled_devices_mask\n";
+  return text;
+}
+String compactCsvRow(const LogRecord &record) {
+  constexpr unsigned CAMERA = 0, ROTARY = 1, BATTERY = 2;
+  const auto &s = record.state;
+  const uint32_t now = record.capturedMs;
+  const bool rtcOK = record.supplyEnabled && s.rtc.running &&
+    fresh(s.rtc.valid, now, s.rtc.updatedMs, 2500);
+  char stamp[24] = {};
+  if (rtcOK) snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d %02d:%02d:%02d",
+    s.rtc.year, s.rtc.month, s.rtc.day, s.rtc.hour, s.rtc.minute, s.rtc.second);
+  const bool batteryOK = record.supplyEnabled && fresh(s.ina[BATTERY].valid, now, s.ina[BATTERY].updatedMs, 2500);
+  const bool rotaryOK = record.supplyEnabled && fresh(s.ina[ROTARY].valid, now, s.ina[ROTARY].updatedMs, 2500);
+  const bool cameraOK = record.supplyEnabled && fresh(s.ina[CAMERA].valid, now, s.ina[CAMERA].updatedMs, 2500);
+  const bool encoderOK = record.supplyEnabled && fresh(s.encoder.valid, now, s.encoder.updatedMs, 500);
+  String line;
+  line.reserve(900);
+  line += String(record.sequence) + "," + String(now) + "," + stamp + "," + String(rtcOK);
+  line += "," + String(uint32_t(now - s.rtc.updatedMs)) + "," + stamp;
+  line += "," + csvNumber(s.ina[BATTERY].voltageV, batteryOK) + "," + csvNumber(s.ina[BATTERY].currentA, batteryOK);
+  line += "," + csvNumber(s.ina[ROTARY].voltageV, rotaryOK) + "," + csvNumber(s.ina[ROTARY].currentA, rotaryOK);
+  line += "," + csvNumber(s.ina[CAMERA].voltageV, cameraOK) + "," + csvNumber(s.ina[CAMERA].currentA, cameraOK) + ",";
+  if (batteryOK && rotaryOK && cameraOK)
+    line += String(s.ina[BATTERY].currentA - s.ina[ROTARY].currentA - s.ina[CAMERA].currentA, 4);
+  line += "," + csvNumber(s.encoder.shaftRpm, encoderOK && s.encoder.rpmValid);
+  const bool dhtOK = record.supplyEnabled && fresh(s.dht.valid, now, s.dht.updatedMs, 6500);
+  line += "," + csvNumber(s.dht.temperatureC, dhtOK);
+  line += "," + csvNumber(s.dht.humidityPct, dhtOK);
+  line += "," + String(dhtOK) + "," + String(uint32_t(now - s.dht.updatedMs));
+  for (const auto &ds : s.ds) {
+    const bool ok = record.supplyEnabled && fresh(ds.valid, now, ds.updatedMs, 2500);
+    line += "," + csvNumber(ds.temperatureC, ok) + "," + String(ok);
+    line += "," + String(uint32_t(now - ds.updatedMs)) + "," + dsStatusName(ds.status);
+  }
+  const auto &imu = s.imu;
+  const bool imuOK = record.supplyEnabled && fresh(imu.valid, now, imu.updatedMs, 200);
+  line += "," + csvNumber(imu.ax, imuOK) + "," + csvNumber(imu.ay, imuOK);
+  line += "," + csvNumber(imu.az, imuOK) + "," + csvNumber(imu.temperatureC, imuOK);
+  line += "," + csvNumber(imu.rollDeg, imuOK && imu.rollValid);
+  line += "," + csvNumber(imu.pitchDeg, imuOK && imu.tiltValid);
+  line += "," + csvNumber(imu.yawDeg, imuOK && imu.yawValid);
+  line += "," + String(imuOK) + "," + String(imuOK && imu.tiltValid);
+  line += "," + String(imuOK && imu.rollValid) + "," + String(imuOK && imu.yawValid);
+  line += "," + String(uint32_t(now - imu.updatedMs));
+  char count[32];
+  snprintf(count, sizeof(count), "%lld", (long long)s.encoder.count);
+  line += ","; if (encoderOK) line += count;
+  line += "," + csvNumber(s.encoder.countsPerSecond, encoderOK);
+  line += "," + csvNumber(s.encoder.shaftRpm, encoderOK && s.encoder.rpmValid);
+  line += "," + csvNumber(s.encoder.wheelRpm, encoderOK && s.encoder.speedValid);
+  line += "," + csvNumber(s.encoder.speedKmh, encoderOK && s.encoder.speedValid);
+  line += "," + String(encoderOK) + "," + String(encoderOK && s.encoder.rpmValid);
+  line += "," + String(encoderOK && s.encoder.speedValid);
+  line += "," + String(uint32_t(now - s.encoder.updatedMs));
+  line += "," + String(sdDropped.load()) + "," + String(imuOK && imu.calibrating);
+  line += "," + String(imu.calibrationSamples) + "," + String(imu.yawReference);
+  line += "," + String(record.intervalMs) + "," + String(record.devicesMask) + "\n";
+  return line;
+}
+
 void logCaptureTask(void *) {
   uint32_t sequence = 0, interval = logIntervalMs.load(), lastCapture = millis();
   uint32_t previousToken = 0;
@@ -1603,6 +1678,9 @@ void recordingControlTask(void *) {
   for (;;) {
     const uint32_t now = millis();
     const bool startPressed = start.pressed(now), stopPressed = stop.pressed(now);
+    char webCommand = 0, queuedCommand = 0;
+    while (xQueueReceive(recordingCommands, &queuedCommand, 0) == pdTRUE) webCommand = queuedCommand;
+    const bool webStart = webCommand == 'S', webStop = webCommand == 'T';
     controlHeartbeatMs.store(now);
     startStable.store(start.stable); stopStable.store(stop.stable);
     if (startPressed) startPresses.fetch_add(1);
@@ -1610,8 +1688,8 @@ void recordingControlTask(void *) {
     if (now % 1000 < 10) controlStackFree.store(uxTaskGetStackHighWaterMark(nullptr));
     uint32_t token = recordingToken.load();
     // STOP wins when both are pressed. Holding START never restarts after STOP.
-    if (stopPressed || stop.stable) token &= ~1u;
-    else if (startPressed && !(token & 1)) token = ((token + 2) & ~1u) | 1u;
+    if (stopPressed || stop.stable || webStop) token &= ~1u;
+    else if ((startPressed || webStart) && !(token & 1)) token = ((token + 2) & ~1u) | 1u;
     const bool starting = (token & 1) && !(recordingToken.load() & 1);
     recordingToken.store(token);
     const uint32_t period = debugBlinkMs.load();
@@ -1928,7 +2006,7 @@ void sdWriterTask(void *) {
         mounted = mounted && chosen;
         if (mounted) {
           File file = SD.open(path, FILE_WRITE);
-          String header = csvHeader();
+          String header = compactCsvHeader();
           mounted = file && file.print(header) == header.length();
           if (file) { file.flush(); mounted = mounted && !file.getWriteError(); file.close(); }
         }
@@ -1946,7 +2024,7 @@ void sdWriterTask(void *) {
       logf("SD: recording %s; interval=%lu ms\n", path, (unsigned long)record.intervalMs);
     }
     record.sequence = ++fileSequence;
-    String line = csvRow(record);
+    String line = compactCsvRow(record);
     File file = SD.open(path, FILE_APPEND);
     bool ok = file && file.print(line) == line.length();
     if (file) { file.flush(); ok = ok && !file.getWriteError(); file.close(); }
@@ -1972,6 +2050,7 @@ void wifiTask(void *) {
   WebServer server(80);
   const char *requestHeaders[] = {"X-Dashboard-Request"};
   server.collectHeaders(requestHeaders, 1);
+  const String bootId = String(esp_random(), HEX);
   server.on("/api/health", HTTP_GET, [&]() {
     String json; json.reserve(900);
     json = "{\"reset_reason\":\"";
@@ -2024,6 +2103,22 @@ void wifiTask(void *) {
     }
     server.send(200, "application/json", String("{\"blink_ms\":") + debugBlinkMs.load() + "}");
   });
+  server.on("/api/record", HTTP_POST, [&]() {
+    if (server.header("X-Dashboard-Request") != "1") {
+      server.send(403, "text/plain", "Dashboard request required"); return;
+    }
+    if (server.arg("boot") != bootId) {
+      server.send(409, "text/plain", "Board restarted; wait for fresh status and try again"); return;
+    }
+    const String action = server.arg("action");
+    const char command = action == "start" ? 'S' : action == "stop" ? 'T' : 0;
+    if (!command) { server.send(400, "text/plain", "Use action=start or action=stop"); return; }
+    if (!enqueueCommand(recordingCommands, command)) {
+      server.send(503, "text/plain", "Recording command queue full"); return;
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(202, "application/json", String("{\"queued\":true,\"action\":\"") + action + "\"}");
+  });
   server.on("/api/settings", HTTP_POST, [&]() {
     if (server.header("X-Dashboard-Request") != "1") {
       server.send(403, "text/plain", "Dashboard request required"); return;
@@ -2045,7 +2140,6 @@ void wifiTask(void *) {
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", String("{\"interval_ms\":") + logIntervalMs.load() + "}");
   });
-  const String bootId = String(esp_random(), HEX);
   uint32_t webSequence = 0;
   server.on("/api/shunt", HTTP_POST, [&]() {
     if (server.header("X-Dashboard-Request") != "1") { server.send(403, "text/plain", "Dashboard request required"); return; }
@@ -2376,9 +2470,10 @@ void setup() {
   stateMutex = xSemaphoreCreateMutex();
   imuCommands = xQueueCreate(8, sizeof(char));
   mcpCommands = xQueueCreate(8, sizeof(char));
+  recordingCommands = xQueueCreate(4, sizeof(char));
   sensorCommands = xQueueCreate(8, sizeof(char));
   logQueue = xQueueCreate(32, sizeof(LogMessage));
-  if (!i2cMutex || !stateMutex || !imuCommands || !mcpCommands ||
+  if (!i2cMutex || !stateMutex || !imuCommands || !mcpCommands || !recordingCommands ||
       !sensorCommands || !logQueue) {
     Serial.println("FATAL: RTOS allocation failed; reset board");
     while (true) delay(1000);

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const core = require(path.resolve(__dirname, '../../dashboard/core.js'));
-const { header, rows } = JSON.parse(fs.readFileSync(0, 'utf8'));
+const { header, rows, compact_header: compactHeader, compact_healthy: compactHealthy } = JSON.parse(fs.readFileSync(0, 'utf8'));
 const parsed = Object.fromEntries(Object.entries(rows).map(([name, csv]) => [name, core.parse({
   header, csv, supply: 'manual', boot: 'native-regression', interval_ms: 250
 }).data]));
@@ -65,4 +65,13 @@ const keys = header.trim().split(',');
 const broken = rows.healthy.trim().split(',');
 broken.splice(keys.indexOf('ds1_status'), 1);
 assert.throws(() => core.parse({header, csv: broken.join(','), supply: 'manual'}));
+const expectedCompactHeader = 'sequence,uptime_ms,rtc_datetime,rtc_valid,rtc_age_ms,date/time,Vbat,Ibat,Vrotary,Irotary,Vcamera,Icamera,Iwheel,RPMencoder,dht22_temp_c,dht22_humidity_pct,dht22_valid,dht22_age_ms,ds1_temp_c,ds1_valid,ds1_age_ms,ds1_status,ds2_temp_c,ds2_valid,ds2_age_ms,ds2_status,ds3_temp_c,ds3_valid,ds3_age_ms,ds3_status,ds4_temp_c,ds4_valid,ds4_age_ms,ds4_status,imu_ax_ms2,imu_ay_ms2,imu_az_ms2,imu_temp_c,roll_deg,pitch_deg,yaw_deg,imu_valid,tilt_valid,roll_valid,yaw_valid,imu_age_ms,encoder_count,encoder_counts_s,shaft_rpm,wheel_rpm,speed_kmh,encoder_valid,rpm_valid,speed_valid,encoder_age_ms,dropped_records,yaw_calibrating,yaw_calibration_samples,yaw_reference,record_interval_ms,enabled_devices_mask';
+assert.equal(compactHeader, expectedCompactHeader);
+assert.equal(compactHeader.split(',').length, 61);
+assert.equal(compactHealthy.split(',').length, 61);
+const compact = core.parse({header: compactHeader, csv: compactHealthy, supply: 'manual'}).data;
+num(compact, 'Vbat', 14.25); num(compact, 'Ibat', -3.25);
+num(compact, 'Vrotary', 13.25); num(compact, 'Irotary', -2.25);
+num(compact, 'Vcamera', 12.25); num(compact, 'Icamera', -1.25);
+num(compact, 'Iwheel', 0.25); num(compact, 'RPMencoder', 60);
 console.log(`Firmware CSV -> DashboardCore.parse: ${Object.keys(rows).length} scenarios passed (${keys.length} columns).`);

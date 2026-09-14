@@ -37,6 +37,9 @@
   let yawReference = 3;
   let lastRecordAt = 0;
   let recordSequence = 0;
+  let recording = false;
+  let recordingSession = 0;
+  let sdWritten = 0;
 
   const enabled = id => {
     const bit = deviceIds.indexOf(id);
@@ -145,13 +148,14 @@
     const uptime = Date.now() - startedAt;
     const values = sampleValues(uptime);
     const recordSamples = [];
-    while (lastRecordAt + intervalMs <= uptime && recordSamples.length < 32) {
+    while (recording && lastRecordAt + intervalMs <= uptime && recordSamples.length < 32) {
       lastRecordAt += intervalMs;
       const recorded = sampleValues(lastRecordAt);
       recorded.sequence = String(++recordSequence);
+      sdWritten += 1;
       recordSamples.push({
         captured_ms: lastRecordAt,
-        recording_session: 1,
+        recording_session: recordingSession,
         interval_ms: intervalMs,
         devices_mask: devicesMask,
         supply: 'manual',
@@ -166,8 +170,8 @@
       csv: header.map(key => values[key] ?? '').join(','),
       devices_mask: devicesMask,
       control_revision: revision,
-      recording: true,
-      recording_session: 1,
+      recording,
+      recording_session: recordingSession,
       blink_ms: blinkMs,
       shunt_mohm: shuntMohm,
       encoder_config: encoder,
@@ -182,7 +186,7 @@
       sd_available: true,
       sd_mounted: enabled('sd'),
       sd_status: enabled('sd') ? 'READY' : 'DISABLED',
-      sd_written: Math.floor((Date.now() - startedAt) / intervalMs),
+      sd_written: sdWritten,
       record_samples: recordSamples,
       record_buffer_pending: 0,
       record_buffer_dropped: 0,
@@ -195,6 +199,18 @@
     if (path === '/api/state') return json(statePacket());
 
     const form = formValues(init);
+    if (path === '/api/record') {
+      if (form.get('boot') !== boot) return json({ error: 'Board restarted' }, 409);
+      const action = form.get('action');
+      if (action === 'start' && !recording) {
+        recording = true;
+        recordingSession += 1;
+        lastRecordAt = Date.now() - startedAt;
+        recordSequence = 0;
+      } else if (action === 'stop') recording = false;
+      else if (action !== 'start') return json({ error: 'Unknown recording action' }, 400);
+      return json({ queued: true, action }, 202);
+    }
     if (path === '/api/device') {
       const bit = deviceIds.indexOf(form.get('device'));
       if (bit < 0) return json({ error: 'Unknown demo device' }, 400);

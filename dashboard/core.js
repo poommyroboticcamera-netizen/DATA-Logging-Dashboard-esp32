@@ -1,6 +1,6 @@
 /* Pure session logic; also executed by the offline regression tests. */
 const DashboardCore = (() => {
-  const DEVICES = [ ['ina1','INA226 · 1'], ['ina2','INA226 · 2'], ['ina3','INA226 · 3'], ['rtc','RTC'], ['imu','IMU'], ['mcp','MCP23017'], ['dht','DHT22'], ['ds1','DS18B20 · 1'], ['ds2','DS18B20 · 2'], ['ds3','DS18B20 · 3'], ['ds4','DS18B20 · 4'], ['encoder','Encoder'], ['sd','SD card'] ];
+  const DEVICES = [ ['ina1','INA226 · Camera (0x40)'], ['ina2','INA226 · Rotary (0x45)'], ['ina3','INA226 · Battery (0x44)'], ['rtc','RTC'], ['imu','IMU'], ['mcp','MCP23017'], ['dht','DHT22'], ['ds1','DS18B20 · 1'], ['ds2','DS18B20 · 2'], ['ds3','DS18B20 · 3'], ['ds4','DS18B20 · 4'], ['encoder','Encoder'], ['sd','SD card'] ];
   function enabled(mask, id) { const i = DEVICES.findIndex(d => d[0] === id); return i >= 0 && Number.isInteger(mask) && (mask & (1 << i)) !== 0; }
   function encoderSettings(ppr, wheel, ratio) {
     const values = [ppr, wheel, ratio].map(Number);
@@ -53,7 +53,46 @@ const DashboardCore = (() => {
       if (/^[=+@]/.test(text)) text = "'" + text;
       return /[",\r\n]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
     };
-    return '\ufeff' + [['pc_received_at', 'supply_state', ...session.keys], ...session.rows]
+    const sensorKeysAfterRpm = [
+      'dht22_temp_c', 'dht22_humidity_pct', 'dht22_valid', 'dht22_age_ms',
+      'ds1_temp_c', 'ds1_valid', 'ds1_age_ms', 'ds1_status',
+      'ds2_temp_c', 'ds2_valid', 'ds2_age_ms', 'ds2_status',
+      'ds3_temp_c', 'ds3_valid', 'ds3_age_ms', 'ds3_status',
+      'ds4_temp_c', 'ds4_valid', 'ds4_age_ms', 'ds4_status',
+      'imu_ax_ms2', 'imu_ay_ms2', 'imu_az_ms2', 'imu_temp_c', 'roll_deg',
+      'pitch_deg', 'yaw_deg', 'imu_valid', 'tilt_valid', 'roll_valid',
+      'yaw_valid', 'imu_age_ms', 'encoder_count', 'encoder_counts_s',
+      'shaft_rpm', 'wheel_rpm', 'speed_kmh', 'encoder_valid', 'rpm_valid',
+      'speed_valid', 'encoder_age_ms', 'dropped_records', 'yaw_calibrating',
+      'yaw_calibration_samples', 'yaw_reference', 'record_interval_ms',
+      'enabled_devices_mask'
+    ];
+    const headers = ['sequence', 'uptime_ms', 'rtc_datetime', 'rtc_valid',
+      'rtc_age_ms', 'date/time', 'Vbat', 'Ibat',
+      'Vrotary', 'Irotary', 'Vcamera', 'Icamera', 'Iwheel', 'RPMencoder'];
+    const positions = Object.fromEntries(session.keys.map((key, index) => [key, index + 2]));
+    const field = (row, key) => positions[key] == null ? '' : row[positions[key]] ?? '';
+    const current = (row, key) => {
+      const raw = field(row, key);
+      if (raw === '') return null;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : null;
+    };
+    const rows = session.rows.map(row => {
+      const ibat = current(row, 'ina3_current_a');
+      const irotary = current(row, 'ina2_current_a');
+      const icamera = current(row, 'ina1_current_a');
+      const iwheel = [ibat, irotary, icamera].every(Number.isFinite)
+        ? (ibat - irotary - icamera).toFixed(4) : '';
+      const rtc = field(row, 'rtc_datetime');
+      return [field(row, 'sequence'), field(row, 'uptime_ms'), rtc,
+        field(row, 'rtc_valid'), field(row, 'rtc_age_ms'), rtc,
+        field(row, 'ina3_voltage_v'), field(row, 'ina3_current_a'),
+        field(row, 'ina2_voltage_v'), field(row, 'ina2_current_a'),
+        field(row, 'ina1_voltage_v'), field(row, 'ina1_current_a'), iwheel,
+        field(row, 'shaft_rpm'), ...sensorKeysAfterRpm.map(key => field(row, key))];
+    });
+    return '\ufeff' + [[...headers, ...sensorKeysAfterRpm], ...rows]
       .map(row => row.map(quote).join(',')).join('\r\n') + '\r\n';
   }
   class ControlState {

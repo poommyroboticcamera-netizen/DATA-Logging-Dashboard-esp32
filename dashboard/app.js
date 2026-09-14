@@ -4,13 +4,14 @@
   const C = DashboardCore;
   const deviceState = new C.ControlState();
   const imuModel = ImuModel.create($('imu-model'), $('imu-model-status'), $('imu-model-reset'), $('imu-model-restore'), $('imu-model-pause'));
-  const reasons = { switch_stop: 'กด SW2 หยุดบันทึก', switch_restart: 'เริ่มรอบใหม่ด้วย SW1', supply_off: 'ปิดซัพพลาย', connection_lost: 'การเชื่อมต่อขาด', manual: 'บันทึกด้วยตนเอง', device_reset: 'บอร์ดเริ่มใหม่', recovered: 'กู้คืนจากครั้งก่อน', schema_change: 'รูปแบบข้อมูลเปลี่ยน', '24h_segment': 'ครบ 24 ชั่วโมง', record_limit: 'ครบ 86,400 แถว', interval_change: 'เปลี่ยนช่วงเวลาบันทึก' };
+  const reasons = { switch_stop: 'หยุดบันทึกจากหน้าเว็บหรือ SW2', switch_restart: 'เริ่มรอบใหม่จากหน้าเว็บหรือ SW1', supply_off: 'ปิดซัพพลาย', connection_lost: 'การเชื่อมต่อขาด', manual: 'บันทึกด้วยตนเอง', device_reset: 'บอร์ดเริ่มใหม่', recovered: 'กู้คืนจากครั้งก่อน', schema_change: 'รูปแบบข้อมูลเปลี่ยน', '24h_segment': 'ครบ 24 ชั่วโมง', record_limit: 'ครบ 86,400 แถว', interval_change: 'เปลี่ยนช่วงเวลาบันทึก' };
   let session = new C.Session(), db = null, files = [], armed = false, lastSuccess = 0, received = false, lostSaved = false;
   let latest = null, chartPoints = [], lastChartUptime = null, requestBusy = false;
   let deviceMask = null, ga = null, controlsBusy = false, encoderDirty = false, shuntDirty = false;
   let gaHzDirty = false, gaHzBusy = false;
   let ledDirty = false, ledBusy = false, sdAvailable = true;
   let currentInterval = 250, intervalDirty = false, settingsBusy = false;
+  let recordingActive = false, recordingBusy = false;
   let persistedSession = null, persistedRows = 0;
   let storageQueue = Promise.resolve(), visualTimer = 0, visualStale = false, lastVisualMs = 0;
   let recordBufferDropped = 0, recordBufferBoot = '';
@@ -113,7 +114,8 @@
   function recordingUI() {
     recordingTime();
     $('row-count').textContent = (session.active?.rows.length || 0).toLocaleString();
-    $('record-pill').textContent = session.active ? 'กำลังเก็บ' : 'พร้อม'; $('record-pill').className = 'pill' + (session.active ? ' on' : '');
+    $('record-pill').textContent = recordingActive ? (session.active ? 'กำลังเก็บ' : 'กำลังเริ่ม') : 'พร้อม';
+    $('record-pill').className = 'pill' + (recordingActive ? ' on' : '');
     $('save').disabled = !session.active?.rows.length;
   }
   function recordingTime() {
@@ -141,7 +143,7 @@
     $('power-pill').textContent = stale ? 'ขาดการเชื่อมต่อ' : powerText[supply] || 'รอข้อมูล';
     $('power-pill').className = 'pill ' + (!stale && supply === 'on' ? 'on' : 'off');
     $('power-note').textContent = stale ? 'แสดง — แทนข้อมูลที่ค้าง' : supply === 'manual' ? 'ไม่อ่าน GPIO15 · ใช้ปุ่มบันทึกหรือเมื่อหลุด Wi-Fi' : supply === 'off' ? 'หยุดอ่าน I2C · รอไฟกลับ' : supply === 'unknown' ? 'ยังไม่ยืนยันไฟดับ · ไม่ปิดรอบบันทึก' : 'เชื่อมต่อกับบอร์ดผ่าน Wi-Fi';
-    $('record-mode-note').textContent = supply === 'manual' ? `เก็บทุก ${currentInterval} ms · เซฟด้วยปุ่มหรือเมื่อหลุด Wi-Fi` : `เก็บทุก ${currentInterval} ms · เซฟเมื่อยืนยันซัพพลายปิด`;
+    $('record-mode-note').textContent = `เก็บทุก ${currentInterval} ms · เริ่ม/หยุดได้จากเว็บหรือสวิตช์บนบอร์ด`;
     const speed = valid('speed_valid') ? n('speed_kmh') : null;
     const temperature = valid('ds1_valid') ? n('ds1_temp_c') : null;
     $('speed').textContent = fmt(speed, 1);
@@ -155,6 +157,11 @@
       $('gauge-ina' + i + '-power').textContent = fmt(ok ? n('ina' + i + '_power_w') : null, 2);
       updateGauge('ina' + i, current, 20);
     }
+    const currentKeys = ['ina3_current_a', 'ina2_current_a', 'ina1_current_a'];
+    const wheelParts = currentKeys.map(key => valid(key) ? n(key) : null);
+    const wheelCurrent = wheelParts.every(Number.isFinite)
+      ? wheelParts[0] - wheelParts[1] - wheelParts[2] : null;
+    $('gauge-iwheel-current').textContent = fmt(wheelCurrent, 2);
     $('rpm').textContent = fmt(valid('rpm_valid') ? n('shaft_rpm') : null, 1);
     $('encoder-note').textContent = !C.enabled(deviceMask, 'encoder') ? '· ปิดการอ่าน Encoder' : valid('speed_valid') ? '· คำนวณจากขนาดล้อและอัตราทดที่ตั้งไว้' : valid('rpm_valid') ? '· RPM พร้อม · ต้องตั้งขนาดล้อ/อัตราทด' : '· รอ Encoder / ตรวจค่า P/R';
     $('clock').textContent = valid('rtc_valid') ? data.rtc_datetime : '—';
@@ -239,6 +246,20 @@
     catch (error) { $('control-status').textContent = 'ยังยืนยันคำสั่งไม่ได้: ' + error.message; }
     finally { controlsBusy = false; renderControls(); }
   }
+  async function setRecording(action) {
+    if (recordingBusy) return;
+    recordingBusy = true; renderControls();
+    $('switch-status').textContent = action === 'start' ? 'กำลังสั่งเริ่มบันทึกจากหน้าเว็บ…' : 'กำลังสั่งหยุดบันทึกจากหน้าเว็บ…';
+    try {
+      if (!deviceState.boot) throw Error('รอสถานะอุปกรณ์จากเฟิร์มแวร์ล่าสุด');
+      await controlPost('/api/record', { action, boot: deviceState.boot });
+      $('switch-status').textContent = action === 'start' ? 'ส่งคำสั่งเริ่มแล้ว · รอสถานะยืนยันจากบอร์ด' : 'ส่งคำสั่งหยุดแล้ว · รอสถานะยืนยันจากบอร์ด';
+    } catch (error) {
+      $('switch-status').textContent = 'สั่งบันทึกไม่สำเร็จ: ' + error.message;
+    } finally {
+      recordingBusy = false; renderControls();
+    }
+  }
   function renderControls() {
     const online = received && Date.now() - lastSuccess < 2500;
     $('imu-calibrate').disabled = !online || !C.enabled(deviceMask, 'imu') || controlsBusy;
@@ -260,6 +281,8 @@
     $('ga-status').textContent = !online ? 'ขาดการเชื่อมต่อ' : ga?.stop_failed ? 'ยืนยัน GA OFF ไม่สำเร็จ' : !C.enabled(deviceMask, 'mcp') ? 'MCP ปิด' : !ga?.valid ? 'MCP ไม่พร้อม' : ga.mask !== ga.commanded ? 'รอยืนยันเอาต์พุต' : ga.chase ? 'ไฟไล่ทำงาน' : 'อ่านเอาต์พุตแล้ว';
     $('encoder-apply').disabled = !online || controlsBusy;
     $('shunt-apply').disabled = !online || controlsBusy;
+    $('record-start').disabled = !online || recordingActive || recordingBusy;
+    $('record-stop').disabled = !online || !recordingActive || recordingBusy;
   }
   function ingestState(packet) {
     if (!Array.isArray(packet.record_samples)) return session.ingest(packet);
@@ -322,7 +345,8 @@
         $('blink-apply').disabled = ledBusy;
         $('blink-status').textContent = `ไฟหนึ่งรอบ ${packet.blink_ms} ms · ${(1000 / packet.blink_ms).toFixed(1)} ครั้ง/วินาที · ไม่เปลี่ยนรอบบันทึก`;
       }
-      $('switch-status').textContent = packet.recording === true ? 'กำลังบันทึก · กด SW2 เพื่อหยุดและดับไฟ' : 'หยุดบันทึก · กด SW1 เพื่อเริ่ม · หน้าเว็บยังอ่านค่าปัจจุบัน';
+      recordingActive = packet.recording === true;
+      $('switch-status').textContent = recordingActive ? 'กำลังบันทึก · หยุดได้จากหน้าเว็บหรือ SW2' : 'หยุดบันทึก · เริ่มได้จากหน้าเว็บหรือ SW1 · หน้าเว็บยังอ่านค่าปัจจุบัน';
       if (!intervalDirty && !settingsBusy) $('interval-ms').value = currentInterval;
       $('interval-apply').disabled = settingsBusy || packet.interval_ms == null;
       if (!settingsBusy) $('interval-status').textContent = `ค่าที่บอร์ดใช้: ${currentInterval} ms · ${(1000 / currentInterval).toFixed(2)} แถว/วินาทีโดยประมาณ`;
@@ -372,9 +396,35 @@
     } finally { requestBusy = false; scheduleVisuals(received && Date.now() - lastSuccess > 2500); }
   }
   async function init() {
-    for (let i = 1; i <= 3; i++) {
-      const row = document.createElement('tr'); row.innerHTML = `<td>CH ${i}</td><td id="ina${i}_voltage_v">—</td><td id="ina${i}_current_a">—</td><td id="ina${i}_power_w">—</td><td id="ina${i}_status">รอข้อมูล</td>`; $('ina-rows').append(row);
-    }
+    const roles = [
+      { index: 3, label: 'Battery · 0x44' },
+      { index: 2, label: 'Rotary · 0x45' },
+      { index: 1, label: 'Camera · 0x40' }
+    ];
+    roles.forEach(({ index, label }) => {
+      const row = document.createElement('tr'); row.innerHTML = `<td>${label}</td><td id="ina${index}_voltage_v">—</td><td id="ina${index}_current_a">—</td><td id="ina${index}_power_w">—</td><td id="ina${index}_status">รอข้อมูล</td>`; $('ina-rows').append(row);
+    });
+    [
+      { index: 3, title: 'BATTERY · INA226', source: 'Vbat / Ibat · ID 0x44' },
+      { index: 2, title: 'ROTARY · INA226', source: 'Vrotary / Irotary · ID 0x45' },
+      { index: 1, title: 'CAMERA · INA226', source: 'Vcamera / Icamera · ID 0x40' }
+    ].forEach(({ index, title, source }) => {
+      const card = document.querySelector('.gauge-card.ina' + index);
+      card.querySelector('.gauge-title').textContent = title;
+      card.querySelector('.gauge-source').textContent = source;
+    });
+    document.querySelector('.gauge-card.ina3 .gauge-details').insertAdjacentHTML('beforeend', '<span>Iwheel <b id="gauge-iwheel-current">—</b> A</span>');
+    $('shunt-1').parentElement.firstChild.nodeValue = 'Camera · 0x40';
+    $('shunt-2').parentElement.firstChild.nodeValue = 'Rotary · 0x45';
+    $('shunt-3').parentElement.firstChild.nodeValue = 'Battery · 0x44';
+    const recordHead = $('record-pill').parentElement;
+    const recordActions = document.createElement('div'); recordActions.className = 'record-head-actions';
+    recordActions.append($('record-pill'));
+    recordActions.insertAdjacentHTML('beforeend', '<button id="record-start" type="button">เริ่มบันทึก</button><button id="record-stop" type="button">หยุดบันทึก</button>');
+    recordHead.append(recordActions);
+    $('record-start').onclick = () => setRecording('start');
+    $('record-stop').onclick = () => setRecording('stop');
+    $('save').firstChild.textContent = 'ดาวน์โหลด CSV ตอนนี้ ';
     $('imu-calibrate').onclick = async () => {
       if (controlsBusy) return;
       controlsBusy = true; renderControls();

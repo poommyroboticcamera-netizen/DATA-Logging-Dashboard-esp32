@@ -45,6 +45,17 @@ void emit(const char *name, uint32_t now = 10000) {
   std::cout << name << '|' << csvRow(record);
 }
 
+void emitCompact(uint32_t now = 10000) {
+  LogRecord record;
+  record.sequence = 42; record.capturedMs = now;
+  record.intervalMs = 250;
+  record.devicesMask = enabledDevices.load();
+  record.supplyEnabled = supplyBusEnabled.load();
+  record.state = getDashboardSnapshot();
+  std::cout << "compact_header|" << compactCsvHeader();
+  std::cout << "compact_healthy|" << compactCsvRow(record);
+}
+
 int main() {
   std::cout << csvHeader();
   sdDropped.store(3);
@@ -79,5 +90,7 @@ int main() {
   dashboard.rtc.updatedMs = dashboard.ina[0].updatedMs = dashboard.ds[0].updatedMs = 7500;
   dashboard.dht.updatedMs = 3500; // 6500 ms freshness boundary
   emit("age_boundary");
+  dashboard = healthyState(9950);
+  emitCompact();
   return 0;
 }

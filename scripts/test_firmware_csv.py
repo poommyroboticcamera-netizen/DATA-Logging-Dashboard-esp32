@@ -70,7 +70,11 @@ def main():
             run([cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(binary)])
             output = run([str(binary)], capture_output=True).stdout
         lines = output.splitlines()
-        payload = {"header": lines[0], "rows": dict(line.split("|", 1) for line in lines[1:])}
+        emitted = dict(line.split("|", 1) for line in lines[1:])
+        compact_header = emitted.pop("compact_header")
+        compact_healthy = emitted.pop("compact_healthy")
+        payload = {"header": lines[0], "rows": emitted,
+                   "compact_header": compact_header, "compact_healthy": compact_healthy}
         if len(payload["rows"]) != 7:
             raise AssertionError("Expected all seven native harness scenarios")
         run([node, str(TESTS / "check_packets.cjs")], input=json.dumps(payload))

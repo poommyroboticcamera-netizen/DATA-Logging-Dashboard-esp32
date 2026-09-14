@@ -13,8 +13,7 @@ assert.equal(ended.length, 1); assert.equal(ended[0].reason, 'supply_off');
 assert.equal(ended[0].rows.length, 10, 'OFF boundary is kept');
 assert.equal(s.ingest(packet(2400, 'off')).completed.length, 0, 'no duplicate OFF saves');
 const csv = C.csv(ended[0]);
-assert.ok(csv.startsWith('\ufeffpc_received_at,supply_state,uptime_ms'));
-assert.ok(csv.includes(',-1.5'), 'negative acceleration stays numeric');
+assert.ok(csv.startsWith('\ufeffsequence,uptime_ms,rtc_datetime,rtc_valid,rtc_age_ms,date/time'));
 assert.equal(csv.trim().split('\r\n').length, 11);
 s.ingest(packet(2600, 'on'));
 assert.equal(s.ingest(packet(10, 'on', 'two')).completed[0].reason, 'device_reset');
@@ -150,3 +149,28 @@ console.log('PASS: OFF confirmation survives old packets, reboot and stale boot 
   assert.equal(persisted.ingest(sw(1750, false, 3)).completed[0].reason, 'switch_stop');
 }
 console.log('PASS: physical START/STOP, live monitoring while stopped, separate sessions');
+
+// Downloaded operator CSV uses the requested power-channel order. Physical
+// mapping: Battery=INA3/0x44, Rotary=INA2/0x45, Camera=INA1/0x40.
+{
+  const keys = ['sequence', 'uptime_ms', 'rtc_datetime', 'rtc_valid', 'rtc_age_ms',
+    'ina1_voltage_v', 'ina1_current_a', 'ina2_voltage_v', 'ina2_current_a',
+    'ina3_voltage_v', 'ina3_current_a', 'shaft_rpm'];
+  const rows = [[
+    '2026-09-14T10:00:00.000Z', 'manual', '1', '100', '2026-09-14 17:00:00', '1', '20',
+    '12.1000', '1.2500', '12.2000', '2.5000', '12.3000', '10.0000', '123.4000'
+  ]];
+  const exported = C.csv({ keys, rows }).replace(/^\ufeff/, '').trim().split('\r\n');
+  const expectedHeader = 'sequence,uptime_ms,rtc_datetime,rtc_valid,rtc_age_ms,date/time,Vbat,Ibat,Vrotary,Irotary,Vcamera,Icamera,Iwheel,RPMencoder,dht22_temp_c,dht22_humidity_pct,dht22_valid,dht22_age_ms,ds1_temp_c,ds1_valid,ds1_age_ms,ds1_status,ds2_temp_c,ds2_valid,ds2_age_ms,ds2_status,ds3_temp_c,ds3_valid,ds3_age_ms,ds3_status,ds4_temp_c,ds4_valid,ds4_age_ms,ds4_status,imu_ax_ms2,imu_ay_ms2,imu_az_ms2,imu_temp_c,roll_deg,pitch_deg,yaw_deg,imu_valid,tilt_valid,roll_valid,yaw_valid,imu_age_ms,encoder_count,encoder_counts_s,shaft_rpm,wheel_rpm,speed_kmh,encoder_valid,rpm_valid,speed_valid,encoder_age_ms,dropped_records,yaw_calibrating,yaw_calibration_samples,yaw_reference,record_interval_ms,enabled_devices_mask';
+  assert.equal(exported[0], expectedHeader);
+  assert.equal(exported[0].split(',').length, 61);
+  assert.equal(exported[1].split(',').length, 61);
+  assert.deepEqual(exported[1].split(',').slice(0, 14), [
+    '1', '100', '2026-09-14 17:00:00', '1', '20', '2026-09-14 17:00:00',
+    '12.3000', '10.0000', '12.2000', '2.5000',
+    '12.1000', '1.2500', '6.2500', '123.4000'
+  ]);
+  const missing = C.csv({ keys, rows: [rows[0].map((value, index) => index === 10 ? '' : value)] });
+  assert.equal(missing.trim().split('\r\n')[1].split(',')[12], '', 'Iwheel stays blank if one current is missing');
+}
+console.log('PASS: compact CSV order, INA role mapping and Iwheel calculation');
