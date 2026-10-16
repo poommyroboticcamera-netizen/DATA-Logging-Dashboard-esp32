@@ -409,6 +409,11 @@
     } finally { requestBusy = false; scheduleVisuals(received && Date.now() - lastSuccess > 2500); }
   }
   async function init() {
+    // Keep each INA card bound to its original channel; change display order only.
+    const gauges = document.querySelector('.gauges');
+    const cameraCard = gauges.querySelector('.gauge-card.ina1');
+    gauges.insertBefore(gauges.querySelector('.gauge-card.ina3'), cameraCard);
+    gauges.insertBefore(gauges.querySelector('.gauge-card.ina2'), cameraCard);
     const roles = [
       { index: 3, label: 'Battery · 0x44' },
       { index: 2, label: 'Rotary · 0x45' },
