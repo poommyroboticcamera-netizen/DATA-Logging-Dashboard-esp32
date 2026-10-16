@@ -17,13 +17,19 @@ GET `/api/state`: snapshot ปัจจุบัน, CSV header/row, boot ID, re
 
 GET `/api/health`: reset reason, uptime, heap, task/control diagnostics, ระดับขาปุ่ม และสถานะ SD
 
-POST: `/api/settings`, `/api/device`, `/api/encoder`, `/api/shunt`, `/api/ga`, `/api/ga-frequency`, `/api/led`
+POST: `/api/settings`, `/api/wifi`, `/api/device`, `/api/encoder`, `/api/shunt`, `/api/ga`, `/api/ga-frequency`, `/api/led`
 
 POST ใช้ form fields และ header `X-Dashboard-Request: 1`; device controls ตรวจ boot/revision เพื่อป้องกันคำสั่งเก่าทับสถานะ Header นี้ไม่ใช่ authentication
+
+`/api/wifi` บันทึก SSID/รหัสผ่านใน NVS แล้วรีสตาร์ต บอร์ดเปิด AP ตลอดเวลาโดยใช้ชื่อ `ESP` ตามด้วย IP ที่เราเตอร์แจก เช่น `ESP10.185.167.203`; ถ้ายังไม่มี IP ใช้ `ESP192.168.4.1` รหัส `88888888` และเข้า `192.168.4.1` เพื่อดูหน้าเว็บและแก้ค่าได้
 
 ## Recording behavior
 
 - `recording: false` แสดงค่าปัจจุบันได้ แต่ไม่เพิ่มแถวบันทึก
+- ค่าเริ่มต้นรอบบันทึก 1000 ms หากเคยตั้งค่าไว้ บอร์ดจะใช้ค่าที่บันทึกใน NVS
+- Encoder อ่านสัญญาณ Z ที่ GPIO33 ขอบขาขึ้น (ไม่ใช้ A/B และไม่คูณ ×4) ค่าเริ่มต้น 1 พัลส์/รอบ Encoder, ล้อ 63 mm, ลูกกลิ้ง 43 mm → อัตราทด 63/43 ≈ 1.465116; การตั้งค่าเก่าของ A/B จะย้ายค่า P/R เป็น 1 โดยคงขนาดล้อและอัตราทดที่ปรับเอง ส่วนค่าเดิม 360/100/1 จะย้ายเป็นค่าเริ่มต้นใหม่ ตรวจจำนวนพัลส์ Z จริงจากคู่มือ Encoder ก่อนใช้
+- เปิดเครื่อง GA ติดทั้งหมดระหว่างเริ่มงานบันทึก แล้วดับเมื่อพร้อมและยังไม่บันทึก; กด START ติดทั้งหมดจน SD เขียนแถวแรกสำเร็จ จากนั้น GA3→GA0 วิ่งตามรอบบันทึก; กด STOP ติดทั้งหมดระหว่างระบายคิวและปิด SD แล้วดับ; หาก SD ผิดพลาดหรือหลังรีเซตจะติดทั้งหมดเมื่อ MCP สั่งงานได้ (หลังรีเซตค้างจนกด START, SD ผิดพลาดค้างจนเขียนสำเร็จ)
+- SD mount และเขียนเฉพาะตอนบันทึก หลัง STOP จะเขียนแถวที่ค้างให้ครบแล้ว unmount; สถานะผิดพลาดดูที่ `sd_status` และ `sd_dropped`
 - เปลี่ยน recording session, boot, schema หรือ interval จะแยกรอบข้อมูล
 - ขาดการเชื่อมต่อเกิน 6 s ปิดรอบที่รับมาแล้วเป็น connection_lost
 - IndexedDB แยกตาม origin/browser; เปลี่ยน IP จะเห็นข้อมูลคนละชุด
@@ -42,6 +48,7 @@ POST ใช้ form fields และ header `X-Dashboard-Request: 1`; device con
 node dashboard/core.test.cjs
 node dashboard/imu-model.test.cjs
 node --check dashboard/app.js
+node scripts/test_ga_demo.cjs
 ```
 
 ดูขาและข้อจำกัดเซนเซอร์ใน [README หลัก](../README.md)

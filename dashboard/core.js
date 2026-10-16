@@ -4,10 +4,10 @@ const DashboardCore = (() => {
   function enabled(mask, id) { const i = DEVICES.findIndex(d => d[0] === id); return i >= 0 && Number.isInteger(mask) && (mask & (1 << i)) !== 0; }
   function encoderSettings(ppr, wheel, ratio) {
     const values = [ppr, wheel, ratio].map(Number);
-    if (!Number.isInteger(values[0]) || values.some((v, i) => !Number.isFinite(v) || v <= 0 || v > (i ? 10000 : 100000))) throw Error('ระบุ P/R เป็นจำนวนเต็ม 1–100000 และขนาดล้อ/อัตราทดมากกว่า 0 ถึง 10000');
+    if (!Number.isInteger(values[0]) || values.some((v, i) => !Number.isFinite(v) || v <= 0 || v > (i ? 10000 : 100000))) throw Error('ระบุจำนวนพัลส์ Z ต่อรอบเป็นจำนวนเต็ม 1–100000 และขนาดล้อ/อัตราทดมากกว่า 0 ถึง 10000');
     return { ppr: values[0], wheel_mm: values[1], ratio: values[2] };
   }
-  const SAMPLE_INTERVAL_MS = 250;
+  const SAMPLE_INTERVAL_MS = 1000;
   const MAX_SESSION_ROWS = 86400; // About 6 hours at 4 Hz.
   function shuntSettings(values) {
     if (!Array.isArray(values) || values.length !== 3) throw Error('ระบุ Rshunt ให้ครบ 3 ช่อง');

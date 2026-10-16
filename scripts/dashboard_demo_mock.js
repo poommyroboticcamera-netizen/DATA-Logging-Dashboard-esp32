@@ -26,13 +26,12 @@
 
   let devicesMask = (1 << deviceIds.length) - 1;
   let revision = 1;
-  let intervalMs = 250;
+  let intervalMs = 1000;
   let blinkMs = 100;
-  let gaMask = 0b0101;
+  let gaMask = 0;
   let gaChase = false;
-  let gaStepMs = 500;
   let shuntMohm = [1, 1, 1];
-  let encoder = { ppr: 360, wheel_mm: 100, ratio: 1 };
+  let encoder = { ppr: 1, wheel_mm: 63, ratio: 63 / 43 };
   let yawCalibrationStarted = null;
   let yawReference = 3;
   let lastRecordAt = 0;
@@ -40,6 +39,9 @@
   let recording = false;
   let recordingSession = 0;
   let sdWritten = 0;
+  let sdReadySession = 0;
+  let sdClosingUntil = 0;
+  let wifiSsid = 'SAT-Lab-2.4G';
 
   const enabled = id => {
     const bit = deviceIds.indexOf(id);
@@ -100,8 +102,8 @@
       roll_valid: enabled('imu') ? '1' : '0',
       yaw_valid: enabled('imu') && !yawCalibrating ? '1' : '0',
       imu_age_ms: '7',
-      encoder_count: String(Math.floor(seconds * 2540.9)),
-      encoder_counts_s: f(2540.9 + wave * 180),
+      encoder_count: String(Math.floor(encoder.ppr * (105.87 * seconds + 7.5 * (1 - Math.cos(seconds * 0.72)) / 0.72) / 60)),
+      encoder_counts_s: f(rpm * encoder.ppr / 60),
       shaft_rpm: f(rpm),
       wheel_rpm: f(wheelRpm),
       speed_kmh: f(speed),
@@ -141,10 +143,6 @@
   }
 
   function statePacket() {
-    if (gaChase && enabled('mcp')) {
-      const step = Math.floor((Date.now() - startedAt) / gaStepMs) % 4;
-      gaMask = 1 << (3 - step);
-    }
     const uptime = Date.now() - startedAt;
     const values = sampleValues(uptime);
     const recordSamples = [];
@@ -153,6 +151,7 @@
       const recorded = sampleValues(lastRecordAt);
       recorded.sequence = String(++recordSequence);
       sdWritten += 1;
+      sdReadySession = recordingSession;
       recordSamples.push({
         captured_ms: lastRecordAt,
         recording_session: recordingSession,
@@ -162,6 +161,11 @@
         csv: header.map(key => recorded[key] ?? '').join(',')
       });
     }
+    const sdReady = recording && sdReadySession === recordingSession;
+    const closing = !recording && uptime < sdClosingUntil;
+    const alertReason = uptime < 500 ? 'startup_pending' : recording && !sdReady ? 'sd_not_ready' : closing ? 'sd_closing' : '';
+    gaChase = sdReady && !alertReason;
+    gaMask = alertReason ? 0b1111 : gaChase ? 1 << (3 - Math.floor(uptime / intervalMs) % 4) : 0;
     return {
       boot,
       supply: 'manual',
@@ -180,16 +184,19 @@
         mask: enabled('mcp') ? gaMask : 0,
         commanded: enabled('mcp') ? gaMask : 0,
         chase: gaChase,
-        stop_failed: false
+        stop_failed: false,
+        safe_hold: false,
+        alert_reason: alertReason
       },
-      ga_step_ms: gaStepMs,
+      ga_step_ms: intervalMs,
       sd_available: true,
-      sd_mounted: enabled('sd'),
-      sd_status: enabled('sd') ? 'READY' : 'DISABLED',
+      sd_mounted: enabled('sd') && (sdReady || closing),
+      sd_status: enabled('sd') ? closing ? 'CLOSING' : recording ? sdReady ? 'READY' : 'MOUNTING' : 'WAITING_FOR_START' : 'DISABLED',
       sd_written: sdWritten,
       record_samples: recordSamples,
       record_buffer_pending: 0,
       record_buffer_dropped: 0,
+      wifi: { ssid: wifiSsid, mode: 'station', ip: '192.168.1.88' },
       demo: true
     };
   }
@@ -199,6 +206,11 @@
     if (path === '/api/state') return json(statePacket());
 
     const form = formValues(init);
+    if (path === '/api/wifi') {
+      if (form.get('boot') !== boot) return json({ error: 'Board restarted' }, 409);
+      wifiSsid = form.get('ssid') || wifiSsid;
+      return json({ saved: true, restarting: true }, 202);
+    }
     if (path === '/api/record') {
       if (form.get('boot') !== boot) return json({ error: 'Board restarted' }, 409);
       const action = form.get('action');
@@ -207,13 +219,17 @@
         recordingSession += 1;
         lastRecordAt = Date.now() - startedAt;
         recordSequence = 0;
-      } else if (action === 'stop') recording = false;
+      } else if (action === 'stop') {
+        if (recording) sdClosingUntil = Date.now() - startedAt + 200;
+        recording = false;
+      }
       else if (action !== 'start') return json({ error: 'Unknown recording action' }, 400);
       return json({ queued: true, action }, 202);
     }
     if (path === '/api/device') {
       const bit = deviceIds.indexOf(form.get('device'));
       if (bit < 0) return json({ error: 'Unknown demo device' }, 400);
+      if (form.get('device') === 'sd' && form.get('enabled') === '0') return json({ error: 'SD recording is automatic' }, 409);
       if (form.get('enabled') === '1') devicesMask |= 1 << bit;
       else devicesMask &= ~(1 << bit);
       if (!enabled('mcp')) { gaMask = 0; gaChase = false; }
@@ -221,10 +237,7 @@
       return json({ boot, control_revision: revision, devices_mask: devicesMask });
     }
     if (path === '/api/ga') {
-      if (form.has('mask')) { gaMask = Number(form.get('mask')) & 0x0f; gaChase = false; }
-      else if (form.get('mode') === 'toggle') { gaMask ^= 1 << Number(form.get('channel')); gaChase = false; }
-      else if (form.get('mode') === 'chase') gaChase = true;
-      return json({ ok: true });
+      return json({ error: 'GA outputs follow recording state automatically' }, 409);
     }
     if (path === '/api/imu') {
       if (form.get('action') !== 'calibrate' || !enabled('imu')) return json({ error: 'IMU is not ready' }, 409);
@@ -232,9 +245,7 @@
       return json({ queued: true }, 202);
     }
     if (path === '/api/ga-frequency') {
-      const hz = Math.min(20, Math.max(0.2, Number(form.get('hz'))));
-      gaStepMs = Math.round(1000 / hz);
-      return json({ hz });
+      return json({ error: 'GA chase follows the recording interval' }, 409);
     }
     if (path === '/api/encoder') {
       encoder = {

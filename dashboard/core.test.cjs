@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const C = require('./core.js');
+assert.equal(C.SAMPLE_INTERVAL_MS, 1000, 'new dashboards default to a 1000 ms recording interval');
 function packet(time, supply, boot = 'one') {
-  return { boot, supply, header: 'uptime_ms,rtc_datetime,imu_ax_ms2', csv: `${time},2026-09-08 12:00:00,-1.5` };
+  return { boot, supply, interval_ms: 250, header: 'uptime_ms,rtc_datetime,imu_ax_ms2', csv: `${time},2026-09-08 12:00:00,-1.5` };
 }
 let s = new C.Session();
 assert.equal(s.ingest(packet(0, 'off')).completed.length, 0);
@@ -97,11 +98,27 @@ const fs = require('node:fs');
 const firmware = fs.readFileSync(require('node:path').join(__dirname, '../src/main.cpp'), 'utf8');
 const names = firmware.match(/deviceNames\[\] = \{([\s\S]*?)\};/)[1].match(/"[^"]+"/g).map(x=>x.slice(1,-1));
 assert.deepEqual(names, C.DEVICES.map(d=>d[0]), 'firmware bit positions match all UI switches');
-// All 16 GA masks must remain distinct from serial chase/reinitialize commands.
-assert.ok(firmware.includes("command = 'A' + raw.toInt()"));
-assert.ok(firmware.includes("uint8_t(command - 'A')"));
-for(let mask=0;mask<16;mask++) assert.ok(!['l','r','0','1','2','3','4'].includes(String.fromCharCode(65+mask)));
-console.log('PASS: device/UI bit mapping, encoder validation, all GA masks separated from serial commands');
+assert.match(firmware, /ENCODER_ROLLER_MM = 43\.0f/);
+assert.match(firmware, /DRIVE_WHEEL_MM = 63\.0f/);
+assert.match(firmware, /ratio = DRIVE_WHEEL_MM \/ ENCODER_ROLLER_MM/);
+assert.match(firmware, /config\.ppr == 360\.0f && config\.wheelMm == 100\.0f && config\.ratio == 1\.0f/);
+const html = fs.readFileSync(require('node:path').join(__dirname, 'index.html'), 'utf8');
+const appSource = fs.readFileSync(require('node:path').join(__dirname, 'app.js'), 'utf8');
+assert.match(html, /WHEEL RPM · รอบล้อ/, 'RPM card identifies wheel rotation');
+assert.match(appSource, /\$\('rpm'\)\.textContent = fmt\(valid\('speed_valid'\) \? n\('wheel_rpm'\)/, 'RPM card uses calculated wheel RPM');
+assert.equal((html.match(/id="wifi-form"/g) || []).length, 1, 'Wi-Fi form appears once');
+assert.match(html, /href="#wifi-settings"/, 'navigation links directly to Wi-Fi setup');
+assert.match(html, /<section id="wifi-settings"/, 'Wi-Fi setup has its own anchor');
+const defaultInput = id => Number(html.match(new RegExp(`<input id="${id}"[^>]*value="([^"]+)"`))[1]);
+assert.equal(defaultInput('encoder-ppr'), 1);
+assert.equal(defaultInput('encoder-wheel'), 63);
+assert.ok(Math.abs(defaultInput('encoder-ratio') - 63 / 43) < 1e-9);
+assert.ok(Math.abs((63 / 43) * 43 - 63) < 1e-9, '43 wheel turns produce about 63 Z pulses without slip');
+assert.match(firmware, /attachInterrupt\(digitalPinToInterrupt\(ENCODER_Z_PIN\), onEncoderZRise, RISING\)/);
+assert.doesNotMatch(firmware, /attachFullQuad|\* 4(?:\.0f)?\s*\/\s*config\.ppr/);
+assert.match(firmware, /\[ENC Z\].*total=.*filtered=/, 'serial output reports accepted and filtered Z edges');
+assert.doesNotMatch(firmware.match(/void IRAM_ATTR onEncoderZRise\(\) \{([\s\S]*?)\n\}/)[1], /Serial|logf|logLine/, 'encoder ISR must never print');
+console.log('PASS: device/UI bit mapping and encoder validation');
 
 assert.deepEqual(C.shuntSettings(['1','1','1']), {ch1:1,ch2:1,ch3:1});
 assert.deepEqual(C.shuntSettings([0.01,2.5,1000]), {ch1:0.01,ch2:2.5,ch3:1000});

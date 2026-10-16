@@ -12,7 +12,6 @@
 #include <SD.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <ESP32Encoder.h>
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -32,6 +31,14 @@ SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t stateMutex = nullptr;
 QueueHandle_t imuCommands = nullptr, mcpCommands = nullptr, recordingCommands = nullptr;
 QueueHandle_t sensorCommands = nullptr, logQueue = nullptr, webRecords = nullptr;
+// Bit 0 = recording; higher bits identify the current START session.
+std::atomic<uint32_t> recordingToken{0};
+std::atomic<bool> gaShutdownRequested{false}, gaShutdownAcknowledged{false};
+std::atomic<bool> gaSafeHold{false};
+std::atomic<bool> gaStartupReady{false}, captureInFlight{false};
+std::atomic<bool> sdMounted{false}, sdFault{false};
+std::atomic<uint32_t> sdReadySession{0};
+std::atomic<uint32_t> sdClosedToken{0};
 
 const char *resetReasonName(esp_reset_reason_t reason) {
   switch (reason) {
@@ -156,7 +163,27 @@ constexpr uint32_t ALL_DEVICES_MASK = (1U << DEVICE_COUNT) - 1;
 std::atomic<uint32_t> enabledDevices{ALL_DEVICES_MASK};
 uint32_t deviceControlRevision = 0; // Wi-Fi task owns revision and switch writes.
 bool deviceEnabled(unsigned id) { return enabledDevices.load() & (1U << id); }
-struct EncoderConfig { float ppr = 360, wheelMm = 100, ratio = 1; };
+// A 43 mm encoder roller contacts the outside of the 63 mm drive wheel.
+// Without slip, the encoder makes 63/43 turns per drive-wheel revolution.
+constexpr float ENCODER_ROLLER_MM = 43.0f;
+constexpr float DRIVE_WHEEL_MM = 63.0f;
+struct EncoderConfig {
+  float ppr = 1, wheelMm = DRIVE_WHEEL_MM, ratio = DRIVE_WHEEL_MM / ENCODER_ROLLER_MM;
+};
+const char *gaAlertReason(uint32_t token) {
+  const bool recording = token & 1U;
+  if (gaSafeHold.load()) return "reset_hold";
+  if (!gaStartupReady.load()) return "startup_pending";
+  if (!supplyBusEnabled.load()) return "supply_off";
+  if (!ENABLE_SD_LOGGING || !deviceEnabled(DEV_SD)) return "sd_disabled";
+  if (sdFault.load()) return "sd_error";
+  // SD is deliberately not probed while stopped. During START, show the
+  // warning until the first row is written; failed writes latch sdFault.
+  if (recording && sdReadySession.load() != (token >> 1)) return "sd_not_ready";
+  // STOP is not complete until the writer has drained queued rows and SD.end().
+  if (!recording && sdClosedToken.load() != token) return "sd_closing";
+  return "";
+}
 EncoderConfig encoderConfig; // Protected by stateMutex after setup.
 struct ShuntConfig { float mohm[3] = {1.0f, 1.0f, 1.0f}; };
 ShuntConfig shuntConfig; // 1 milliohm = 0.001 ohm. Protected by stateMutex.
@@ -227,11 +254,8 @@ bool mcpReady = false;
 bool imuReady = false;
 
 uint8_t outputMask = 0;
-constexpr uint32_t DEFAULT_GA_STEP_MS = 500;
+constexpr uint32_t DEFAULT_GA_STEP_MS = 1000;
 std::atomic<uint32_t> gaStepMs{DEFAULT_GA_STEP_MS};
-uint32_t gaPeriodForHz(float hz) {
-  return isfinite(hz) && hz >= 0.2f && hz <= 20.0f ? uint32_t(lroundf(1000.0f / hz)) : 0;
-}
 bool lightChaseRunning = false;
 uint8_t lightChasePin = 3;
 uint32_t lightChaseLastMs = 0;
@@ -1038,12 +1062,7 @@ void publishIMU() {
 // ============================================================
 void printHelp() {
   logLine("\n--- COMMANDS ---");
-  logLine("1 : GA0 ON -> OP3 / CN15; other outputs OFF");
-  logLine("2 : GA1 ON -> OP2 / CN16; other outputs OFF");
-  logLine("3 : GA2 ON -> OP1 / CN17; other outputs OFF");
-  logLine("4 : GA3 ON -> OP0 / CN18; other outputs OFF");
-  logLine("0 : Stop light chase; all GA0..3 outputs OFF");
-  logLine("l : Start light chase GA3 -> GA2 -> GA1 -> GA0 (500 ms)");
+  logLine("GA: startup/SD pending/error = all ON; recording + SD ready = chase; STOP waits for SD close, then OFF");
   logLine("t : Set RTC to sketch compile time");
   logLine("s : Scan I2C");
   logLine("i : Diagnose and reinitialize only MPU6050 / MPU6500");
@@ -1085,9 +1104,7 @@ void dispatchCommand(char command) {
     if (command != '\n' && command != '\r') logLine("I2C paused: supply OFF/UNKNOWN; command rejected");
     return;
   }
-  if ((command >= '0' && command <= '4') || command == 'l') {
-    if (deviceEnabled(DEV_MCP)) enqueueCommand(mcpCommands, command);
-  } else if (command == 'c' || command == 'z' || command == 'i') {
+  if (command == 'c' || command == 'z' || command == 'i') {
     if (deviceEnabled(DEV_IMU)) enqueueCommand(imuCommands, command);
   } else if (command == 's' || command == 't') {
     enqueueCommand(sensorCommands, command);
@@ -1148,9 +1165,21 @@ void imuTask(void *) {
 void mcpTask(void *) {
   TickType_t wake = xTaskGetTickCount();
   uint32_t lastRead = 0, lastRetry = 0;
-  uint32_t generation = UINT32_MAX;
+  uint32_t generation = mcpReady ? supplyGeneration.load() : UINT32_MAX;
+  uint32_t appliedRecordingToken = UINT32_MAX;
   bool wasEnabled = true;
   for (;;) {
+    if (gaShutdownRequested.load()) {
+      lightChaseRunning = false;
+      bool off = !supplyBusEnabled.load() || !deviceEnabled(DEV_MCP);
+      if (!off) {
+        uint8_t actual = 0xFF;
+        off = write8(MCP_ADDR, 0x14, 0) && read8(MCP_ADDR, 0x12, actual) && (actual & 15) == 0;
+        if (off) outputMask = 0;
+      }
+      gaShutdownAcknowledged.store(off);
+      waitPeriod(wake, 10); continue;
+    }
     if (!deviceEnabled(DEV_MCP)) {
       if (wasEnabled) {
         lightChaseRunning = false;
@@ -1163,13 +1192,14 @@ void mcpTask(void *) {
         mcpReady = false; outputMask = 0;
         { Lock lock(stateMutex); dashboard.mcp.valid = false; dashboard.mcp.chase = false; }
       }
-      wasEnabled = false; generation = UINT32_MAX; xQueueReset(mcpCommands);
+      wasEnabled = false; generation = UINT32_MAX; appliedRecordingToken = UINT32_MAX; xQueueReset(mcpCommands);
       waitPeriod(wake, 10); continue;
     }
     wasEnabled = true;
     if (!supplyBusEnabled.load()) {
       mcpReady = lightChaseRunning = false;
       outputMask = 0;
+      appliedRecordingToken = UINT32_MAX;
       xQueueReset(mcpCommands);
       waitPeriod(wake, 10);
       continue;
@@ -1179,24 +1209,26 @@ void mcpTask(void *) {
       lastRetry = millis();
       xQueueReset(mcpCommands); // Never replay commands issued before a bus failure.
       const bool initialized = initMCP();
+      appliedRecordingToken = UINT32_MAX;
       mcpStopFailed.store(!initialized); // Restore outputs OFF; do not replay old light commands.
     }
     char command;
-    if (xQueueReceive(mcpCommands, &command, 0) == pdTRUE) {
-      if (command == 'r') { initMCP(); lastRetry = millis(); }
-      else if (command == 'l') startLightChase();
-      else if (command >= 'U' && command <= 'X') {
+    if (xQueueReceive(mcpCommands, &command, 0) == pdTRUE && command == 'r') {
+      initMCP(); lastRetry = millis(); appliedRecordingToken = UINT32_MAX;
+    }
+    if (mcpReady) {
+      const uint32_t token = recordingToken.load();
+      const bool recording = token & 1U;
+      if (gaAlertReason(token)[0]) {
         lightChaseRunning = false;
-        setOutputs(outputMask ^ uint8_t(1U << (command - 'U')));
-      } else if (command >= 'A' && command <= 'P') {
-        lightChaseRunning = false;
-        setOutputs(uint8_t(command - 'A'));
-      } else {
-        lightChaseRunning = false;
-        setOutputs(command == '0' ? 0 : uint8_t(1U << (command - '1')));
+        if (outputMask != 0x0F) setOutputs(0x0F);
+        appliedRecordingToken = UINT32_MAX;
+      } else if (token != appliedRecordingToken || (recording && !lightChaseRunning) ||
+                 (!recording && (lightChaseRunning || outputMask != 0))) {
+        if (recording) startLightChase();
+        else { lightChaseRunning = false; if (outputMask) setOutputs(0); }
+        if (mcpReady) appliedRecordingToken = token;
       }
-      lastRead = millis();
-      sampleMCP();
     }
     updateLightChase();
     if (millis() - lastRead >= 100) {
@@ -1205,6 +1237,21 @@ void mcpTask(void *) {
     }
     waitPeriod(wake, 10);
   }
+}
+
+void prepareGAForRestart() {
+  // Ask the MCP owner to stop its automatic pattern before the ESP32 resets.
+  gaShutdownRequested.store(true);
+  const uint32_t started = millis();
+  while (!gaShutdownAcknowledged.load() && uint32_t(millis() - started) < 500)
+    vTaskDelay(pdMS_TO_TICKS(10));
+  // The task may not exist yet when startup fails; attempt a bounded direct write.
+  if (!gaShutdownAcknowledged.load() && i2cMutex && supplyBusEnabled.load()) {
+    uint8_t actual = 0xFF;
+    gaShutdownAcknowledged.store(write8(MCP_ADDR, 0x14, 0) &&
+                                 read8(MCP_ADDR, 0x12, actual) && (actual & 15) == 0);
+  }
+  if (!gaShutdownAcknowledged.load()) logLine("GA OFF could not be confirmed before restart");
 }
 
 // Owned by supplyTask; voltage ADC is independent of the I2C bus.
@@ -1312,6 +1359,7 @@ void sensorTask(void *) {
   }
 }
 
+void printEncoderSerialDebug();
 void printDashboard() {
   const DashboardState state = getDashboardSnapshot();
   const uint32_t now = millis();
@@ -1328,15 +1376,7 @@ void printDashboard() {
     if (ds.valid) Serial.printf(" T=%.2f C", ds.temperatureC);
     Serial.printf(" power=%s age=%lu ms\n", ds.parasite ? "PARASITE" : "EXTERNAL/UNKNOWN", (unsigned long)(now - ds.updatedMs));
   }
-  const auto &enc = state.encoder;
-  if (enc.valid) {
-    Serial.printf("Encoder count=%lld rate=%+.1f counts/s", (long long)enc.count, enc.countsPerSecond);
-    if (enc.rpmValid) Serial.printf(" shaft=%+.2f RPM", enc.shaftRpm);
-    else Serial.print(" RPM=CONFIG REQUIRED (PPR)");
-    if (enc.speedValid) Serial.printf(" wheel=%+.2f RPM speed=%+.3f km/h", enc.wheelRpm, enc.speedKmh);
-    else Serial.print(" speed=CONFIG REQUIRED (wheel/ratio)");
-    Serial.println();
-  } else Serial.println("Encoder: NOT READY");
+  if (SERIAL_ENCODER_DEBUG) printEncoderSerialDebug();
   const auto &supply = state.supply12v;
   if (!SUPPLY_MONITOR_ENABLED) {
     Serial.println("12V supply: MONITOR DISABLED (GPIO15 ADC not read)");
@@ -1398,19 +1438,53 @@ void printDashboard() {
 
 
 // Runtime interval shared by telemetry and SD capture. Wi-Fi task owns NVS writes.
-constexpr uint32_t DEFAULT_LOG_INTERVAL_MS = 250;
+constexpr uint32_t DEFAULT_LOG_INTERVAL_MS = 1000;
 constexpr uint32_t MIN_LOG_INTERVAL_MS = 100, MAX_LOG_INTERVAL_MS = 60000;
 std::atomic<uint32_t> logIntervalMs{DEFAULT_LOG_INTERVAL_MS};
-// Bit 0 = recording; remaining bits identify each physical START session.
-// Only recordingControlTask writes this token; boot always starts stopped.
-constexpr const char *FIRMWARE_BUILD = "20260914-web-record-power-csv-1";
-std::atomic<uint32_t> recordingToken{0};
+// Only recordingControlTask writes recordingToken; boot always starts stopped.
+constexpr const char *FIRMWARE_BUILD = "v2.0";
+constexpr const char *WIFI_SETUP_FALLBACK_SSID = "ESP192.168.4.1";
+constexpr const char *WIFI_SETUP_PASSWORD = "88888888";
 std::atomic<uint32_t> controlHeartbeatMs{0}, controlStackFree{0};
 std::atomic<uint32_t> startPresses{0}, stopPresses{0};
 std::atomic<bool> startStable{false}, stopStable{false};
 std::atomic<uint32_t> debugBlinkMs{DEFAULT_DEBUG_BLINK_MS};
 Preferences logPreferences;
 bool logPreferencesReady = false;
+struct WifiConfig {
+  uint32_t magic = 0;
+  char ssid[33] = {};
+  char password[64] = {};
+};
+constexpr uint32_t WIFI_CONFIG_MAGIC = 0x57494649; // "WIFI"
+bool validWifiConfig(const WifiConfig &config) {
+  const size_t ssidLength = strnlen(config.ssid, sizeof(config.ssid));
+  const size_t passwordLength = strnlen(config.password, sizeof(config.password));
+  return config.magic == WIFI_CONFIG_MAGIC && ssidLength > 0 && ssidLength <= 32 &&
+    passwordLength < sizeof(config.password) && (passwordLength == 0 || passwordLength >= 8);
+}
+WifiConfig loadWifiConfig() {
+  WifiConfig config;
+  if (logPreferencesReady && logPreferences.getBytesLength("wifi") == sizeof(config))
+    logPreferences.getBytes("wifi", &config, sizeof(config));
+  if (!validWifiConfig(config)) {
+    config = WifiConfig{};
+    config.magic = WIFI_CONFIG_MAGIC;
+    strlcpy(config.ssid, WIFI_SSID, sizeof(config.ssid));
+    strlcpy(config.password, WIFI_PASSWORD, sizeof(config.password));
+  }
+  return config;
+}
+String jsonEscape(const char *source) {
+  String result;
+  if (!source) return result;
+  result.reserve(strlen(source) + 8);
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(source); *p; ++p) {
+    if (*p == '"' || *p == '\\') { result += '\\'; result += char(*p); }
+    else if (*p >= 0x20) result += char(*p);
+  }
+  return result;
+}
 bool validLogInterval(uint32_t ms) { return ms >= MIN_LOG_INTERVAL_MS && ms <= MAX_LOG_INTERVAL_MS; }
 void loadLogSettings() {
   logPreferencesReady = logPreferences.begin("dashboard", false);
@@ -1418,14 +1492,24 @@ void loadLogSettings() {
   logIntervalMs.store(validLogInterval(saved) ? saved : DEFAULT_LOG_INTERVAL_MS);
   uint32_t blink = logPreferencesReady ? logPreferences.getUInt("blink_ms", DEFAULT_DEBUG_BLINK_MS) : DEFAULT_DEBUG_BLINK_MS;
   debugBlinkMs.store(blink >= 40 && blink <= 2000 ? blink : DEFAULT_DEBUG_BLINK_MS);
-  const uint32_t gaStep = logPreferencesReady ? logPreferences.getUInt("ga_step_ms", DEFAULT_GA_STEP_MS) : DEFAULT_GA_STEP_MS;
-  gaStepMs.store(gaStep >= 50 && gaStep <= 5000 ? gaStep : DEFAULT_GA_STEP_MS);
+  // GA chase follows the recording cadence; an older standalone GA rate is ignored.
+  gaStepMs.store(logIntervalMs.load());
   EncoderConfig config;
   if (logPreferencesReady && logPreferences.getBytesLength("encoder") == sizeof(config)) {
     logPreferences.getBytes("encoder", &config, sizeof(config));
     if (!isfinite(config.ppr) || config.ppr <= 0 || config.ppr > 100000 ||
         !isfinite(config.wheelMm) || config.wheelMm < 0 || config.wheelMm > 10000 ||
         !isfinite(config.ratio) || config.ratio < 0 || config.ratio > 10000) config = EncoderConfig{};
+    else if (!logPreferences.getBool("encoder_z", false)) {
+      // Existing ppr was for quadrature channel A, not index Z. Preserve
+      // custom wheel geometry; migrate the old 100 mm / 1:1 factory geometry.
+      if (config.ppr == 360.0f && config.wheelMm == 100.0f && config.ratio == 1.0f)
+        config = EncoderConfig{};
+      else config.ppr = 1.0f;
+      if (logPreferences.putBytes("encoder", &config, sizeof(config)) != sizeof(config) ||
+          logPreferences.putBool("encoder_z", true) != 1)
+        logLine("Encoder Z: could not persist migrated settings");
+    }
   }
   encoderConfig = config;
   ShuntConfig shunts;
@@ -1435,7 +1519,9 @@ void loadLogSettings() {
   }
   shuntConfig = shunts;
   const uint32_t savedMask = logPreferencesReady ? logPreferences.getUInt("devices", ALL_DEVICES_MASK) : ALL_DEVICES_MASK;
-  enabledDevices.store(savedMask & ALL_DEVICES_MASK & (ENABLE_SD_LOGGING ? ALL_DEVICES_MASK : ~(1U << DEV_SD)));
+  // Recording always attempts SD when firmware support is enabled.
+  enabledDevices.store((savedMask | (ENABLE_SD_LOGGING ? (1U << DEV_SD) : 0U)) &
+                       ALL_DEVICES_MASK & (ENABLE_SD_LOGGING ? ALL_DEVICES_MASK : ~(1U << DEV_SD)));
   logf("Device switches restored: mask=0x%04lX\n", (unsigned long)enabledDevices.load());
 }
 struct LogRecord {
@@ -1449,7 +1535,6 @@ struct LogRecord {
 QueueHandle_t sdRecords = nullptr;
 std::atomic<uint32_t> sdDropped{0}, sdWritten{0};
 std::atomic<uint32_t> webRecordDropped{0};
-std::atomic<bool> sdMounted{false};
 std::atomic<const char *> sdStatus{"WAITING_FOR_START"};
 std::atomic<uint32_t> sdCardMiB{0};
 
@@ -1627,6 +1712,8 @@ void logCaptureTask(void *) {
       previousToken = token; interval = requested; lastCapture = now; sequence = 0;
     }
     if (!(token & 1) || uint32_t(now - lastCapture) < interval) continue;
+    captureInFlight.store(true);
+    if (recordingToken.load() != token) { captureInFlight.store(false); continue; }
     lastCapture += (uint32_t(now - lastCapture) / interval) * interval;
     LogRecord record;
     record.recordingSession = token >> 1;
@@ -1635,8 +1722,11 @@ void logCaptureTask(void *) {
     record.state = getDashboardSnapshot();
     record.capturedMs = millis();
     record.supplyEnabled = supplyBusEnabled.load();
-    if (recordingToken.load() != token) continue;
-    if (ENABLE_SD_LOGGING && deviceEnabled(DEV_SD) && xQueueSend(sdRecords, &record, 0) != pdTRUE) sdDropped.fetch_add(1);
+    if (recordingToken.load() != token) { captureInFlight.store(false); continue; }
+    if (ENABLE_SD_LOGGING && deviceEnabled(DEV_SD) && xQueueSend(sdRecords, &record, 0) != pdTRUE) {
+      sdDropped.fetch_add(1);
+      sdFault.store(true);
+    }
     // Browser rendering/network timing must not define the recording cadence.
     // Keep exact firmware-timed samples until /api/state collects them.
     if (xQueueSend(webRecords, &record, 0) != pdTRUE) {
@@ -1648,6 +1738,7 @@ void logCaptureTask(void *) {
         webRecordDropped.fetch_add(1);
       }
     }
+    captureInFlight.store(false);
   }
 }
 
@@ -1689,7 +1780,10 @@ void recordingControlTask(void *) {
     uint32_t token = recordingToken.load();
     // STOP wins when both are pressed. Holding START never restarts after STOP.
     if (stopPressed || stop.stable || webStop) token &= ~1u;
-    else if ((startPressed || webStart) && !(token & 1)) token = ((token + 2) & ~1u) | 1u;
+    else if ((startPressed || webStart) && !(token & 1)) {
+      token = ((token + 2) & ~1u) | 1u;
+      gaSafeHold.store(false);
+    }
     const bool starting = (token & 1) && !(recordingToken.load() & 1);
     recordingToken.store(token);
     const uint32_t period = debugBlinkMs.load();
@@ -1706,42 +1800,102 @@ void recordingControlTask(void *) {
   }
 }
 
-// Set from the encoder specification/mechanics. Zero means unknown, so
-// no fabricated RPM or speed is displayed/logged before calibration.
-// PPR, wheel diameter and ratio are configured from the dashboard (encoderConfig).
-constexpr int ENCODER_SIGN = 1; // Change to -1 to reverse reported direction
-ESP32Encoder encoder;
+// Index Z gives one rising edge per encoder revolution (not quadrature x4).
+// It cannot reveal direction. The shaft is coupled to the 43 mm friction
+// roller; wheel RPM = shaft RPM / (63/43) without slip.
+constexpr int ENCODER_Z_PIN = 33;
+constexpr uint32_t ENCODER_Z_GLITCH_US = 100;
+portMUX_TYPE encoderZMux = portMUX_INITIALIZER_UNLOCKED;
+volatile uint64_t encoderZPulses = 0;
+volatile uint32_t encoderZLastUs = 0, encoderZPeriodUs = 0;
+volatile uint32_t encoderZRejectedEdges = 0;
+
+void IRAM_ATTR onEncoderZRise() {
+  const uint32_t now = micros();
+  portENTER_CRITICAL_ISR(&encoderZMux);
+  const uint32_t elapsed = uint32_t(now - encoderZLastUs);
+  if (!encoderZPulses || elapsed >= ENCODER_Z_GLITCH_US) {
+    if (encoderZPulses) encoderZPeriodUs = elapsed;
+    encoderZLastUs = now;
+    ++encoderZPulses;
+  } else ++encoderZRejectedEdges;
+  portEXIT_CRITICAL_ISR(&encoderZMux);
+}
+
+float encoderZRateHz(uint32_t periodUs, uint32_t ageUs) {
+  if (!periodUs) return 0.0f; // Need two index pulses to know the period.
+  const uint32_t stopAfterUs = periodUs < 166666666U ?
+    (periodUs * 3U < 500000U ? 500000U : periodUs * 3U) : 500000000U;
+  if (ageUs >= stopAfterUs) return 0.0f;
+  return 1000000.0f / float(ageUs > periodUs ? ageUs : periodUs);
+}
+
+void printEncoderSerialDebug() {
+  uint64_t pulses;
+  uint32_t lastPulseUs, periodUs, rejected;
+  portENTER_CRITICAL(&encoderZMux);
+  pulses = encoderZPulses;
+  lastPulseUs = encoderZLastUs;
+  periodUs = encoderZPeriodUs;
+  rejected = encoderZRejectedEdges;
+  portEXIT_CRITICAL(&encoderZMux);
+
+  const uint32_t nowUs = micros();
+  const uint32_t ageUs = pulses ? uint32_t(nowUs - lastPulseUs) : 0;
+  const EncoderConfig config = getEncoderConfig();
+  const float rateHz = pulses >= 2 ? encoderZRateHz(periodUs, ageUs) : 0.0f;
+  const float shaftRpm = config.ppr > 0 ? rateHz * 60.0f / config.ppr : 0.0f;
+  const float wheelRpm = config.ratio > 0 ? shaftRpm / config.ratio : 0.0f;
+  const char *status = !deviceEnabled(DEV_ENCODER) ? "DISABLED" :
+    !supplyBusEnabled.load() ? "SUPPLY_PAUSED" :
+    !pulses ? "NO_EDGES" : pulses == 1 ? "WAIT_SECOND_EDGE" :
+    !rateHz ? "STOPPED_OR_STALE" : "OK";
+  static uint64_t priorPulses = 0;
+  static uint32_t priorMs = 0;
+  const uint32_t nowMs = millis();
+  const uint32_t elapsedMs = priorMs ? uint32_t(nowMs - priorMs) : 0;
+  const uint64_t newPulses = pulses - priorPulses;
+  priorPulses = pulses;
+  priorMs = nowMs;
+
+  Serial.printf("[ENC Z] GPIO%d=%s total=%llu +%llu/%lums filtered=%lu ",
+    ENCODER_Z_PIN, digitalRead(ENCODER_Z_PIN) ? "HIGH" : "LOW",
+    (unsigned long long)pulses, (unsigned long long)newPulses,
+    (unsigned long)elapsedMs, (unsigned long)rejected);
+  if (pulses) Serial.printf("age=%lums ", (unsigned long)(ageUs / 1000U));
+  else Serial.print("age=none ");
+  if (periodUs) Serial.printf("period=%luus ", (unsigned long)periodUs);
+  else Serial.print("period=none ");
+  Serial.printf("Z/rev=%.0f shaft=%.2fRPM wheel=%.2fRPM %s\n",
+    config.ppr, shaftRpm, wheelRpm, status);
+}
 
 void encoderTask(void *) {
-  // Hardware PCNT continues counting during DHT/OneWire timing sections.
-  ESP32Encoder::useInternalWeakPullResistors = puType::none; // PCB has 4.7k pull-ups
-  encoder.attachFullQuad(32, 33);
-  if (!encoder.isAttached()) {
-    logLine("Encoder: PCNT attach FAILED");
-    vTaskDelete(nullptr);
-    return;
-  }
-  encoder.setFilter(100); // 1.25 us at 80 MHz APB
-  encoder.clearCount();
+  pinMode(ENCODER_Z_PIN, INPUT_PULLUP); // PCB also has a 4.7 kΩ pull-up.
+  attachInterrupt(digitalPinToInterrupt(ENCODER_Z_PIN), onEncoderZRise, RISING);
+  logLine("Encoder: reading index Z on GPIO33; one pulse/rev; direction unavailable");
   TickType_t wake = xTaskGetTickCount();
-  int64_t previous = 0;
-  uint32_t previousUs = micros();
   uint32_t generation = UINT32_MAX;
   for (;;) {
     waitPeriod(wake, 100);
-    const int64_t count = encoder.getCount();
+    uint64_t count;
+    uint32_t lastPulseUs, periodUs;
+    portENTER_CRITICAL(&encoderZMux);
+    count = encoderZPulses;
+    lastPulseUs = encoderZLastUs;
+    periodUs = encoderZPeriodUs;
+    portEXIT_CRITICAL(&encoderZMux);
     const uint32_t nowUs = micros();
     EncoderReading value;
     value.updatedMs = millis();
-    value.count = count * ENCODER_SIGN;
-    const float dt = uint32_t(nowUs - previousUs) * 1e-6f;
+    value.count = static_cast<int64_t>(count);
     const uint32_t currentGeneration = supplyGeneration.load();
     const EncoderConfig config = getEncoderConfig();
-    if (deviceEnabled(DEV_ENCODER) && supplyBusEnabled.load() && generation == currentGeneration && dt > 0 && dt < 0.5f) {
-      value.valid = true; // Counter active; not proof of a connected sensor
-      value.countsPerSecond = (count - previous) * ENCODER_SIGN / dt;
+    if (deviceEnabled(DEV_ENCODER) && supplyBusEnabled.load() && generation == currentGeneration) {
+      value.valid = true; // Configured input; not proof of a connected sensor.
+      value.countsPerSecond = count >= 2 ? encoderZRateHz(periodUs, uint32_t(nowUs - lastPulseUs)) : 0.0f;
       value.rpmValid = config.ppr > 0;
-      if (value.rpmValid) value.shaftRpm = value.countsPerSecond * 60.0f / (config.ppr * 4.0f);
+      if (value.rpmValid) value.shaftRpm = value.countsPerSecond * 60.0f / config.ppr;
       value.speedValid = value.rpmValid && config.wheelMm > 0 && config.ratio > 0;
       if (value.speedValid) {
         value.wheelRpm = value.shaftRpm / config.ratio;
@@ -1749,8 +1903,6 @@ void encoderTask(void *) {
       }
     }
     generation = deviceEnabled(DEV_ENCODER) ? currentGeneration : UINT32_MAX;
-    previous = count;
-    previousUs = nowUs;
     Lock lock(stateMutex);
     dashboard.encoder = value;
   }
@@ -1973,8 +2125,7 @@ void temperatureTask(void *) {
 // when main supply is OFF; I2C values are blank and supply_on=0 in those rows.
 // This task alone owns SPI/SD. No disk operation holds the dashboard mutex.
 void sdWriterTask(void *) {
-  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  bool mounted = false;
+  bool mounted = false, sdStarted = false;
   char path[32] = {};
   uint32_t nextAttempt = 0;
   unsigned session = 1;
@@ -1982,7 +2133,20 @@ void sdWriterTask(void *) {
   uint32_t activeInterval = 0, fileSequence = 0;
   for (;;) {
     LogRecord record;
-    if (xQueueReceive(sdRecords, &record, pdMS_TO_TICKS(200)) != pdTRUE) continue;
+    if (xQueueReceive(sdRecords, &record, pdMS_TO_TICKS(200)) != pdTRUE) {
+      const uint32_t token = recordingToken.load();
+      if (!(token & 1) || !deviceEnabled(DEV_SD)) {
+        // STOP is acknowledged only after the capture task and SD queue are
+        // empty, and the single SD owner has closed the card.
+        if (captureInFlight.load() || uxQueueMessagesWaiting(sdRecords)) continue;
+        if (sdStarted) sdStatus.store("CLOSING");
+        if (sdStarted) { SD.end(); sdStarted = false; }
+        mounted = false; sdMounted.store(false);
+        sdStatus.store(deviceEnabled(DEV_SD) ? "WAITING_FOR_START" : "DISABLED");
+        if (!(token & 1)) sdClosedToken.store(token);
+      }
+      continue;
+    }
     if (!deviceEnabled(DEV_SD)) continue;
     if (record.recordingSession != activeRecordingSession || record.intervalMs != activeInterval) {
       activeRecordingSession = record.recordingSession;
@@ -1993,7 +2157,9 @@ void sdWriterTask(void *) {
       if (int32_t(millis() - nextAttempt) < 0) { sdDropped.fetch_add(1); continue; }
       sdStatus.store("MOUNTING");
       sdCardMiB.store(0);
-      SD.end();
+      if (sdStarted) SD.end();
+      else SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+      sdStarted = true;
       mounted = SD.begin(SD_CS, SPI, 4000000);
       if (mounted && SD.cardType() != CARD_NONE) {
         sdCardMiB.store(uint32_t(SD.cardSize() / (1024ULL * 1024ULL)));
@@ -2013,6 +2179,7 @@ void sdWriterTask(void *) {
       } else mounted = false;
       sdMounted.store(mounted);
       if (!mounted) {
+        sdFault.store(true);
         sdStatus.store("MOUNT_OR_CREATE_FAILED");
         logLine("SD: mount/create failed; check FAT32 filesystem, card and wiring; retry in 5 seconds");
         nextAttempt = millis() + 5000;
@@ -2028,10 +2195,11 @@ void sdWriterTask(void *) {
     File file = SD.open(path, FILE_APPEND);
     bool ok = file && file.print(line) == line.length();
     if (file) { file.flush(); ok = ok && !file.getWriteError(); file.close(); }
-    if (ok) { sdWritten.fetch_add(1); sdStatus.store("READY"); }
+    if (ok) { sdWritten.fetch_add(1); sdFault.store(false); sdReadySession.store(record.recordingSession); sdStatus.store("READY"); }
     else {
       mounted = false;
       sdMounted.store(false);
+      sdFault.store(true);
       sdDropped.fetch_add(1);
       nextAttempt = millis() + 5000;
       sdStatus.store("WRITE_FAILED");
@@ -2043,14 +2211,18 @@ void sdWriterTask(void *) {
 
 // The Wi-Fi server owns network IO. It never reads I2C directly.
 void wifiTask(void *) {
+  WifiConfig wifiConfig = loadWifiConfig();
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(wifiConfig.ssid, wifiConfig.password);
   WebServer server(80);
   const char *requestHeaders[] = {"X-Dashboard-Request"};
   server.collectHeaders(requestHeaders, 1);
   const String bootId = String(esp_random(), HEX);
+  char activeSetupSsid[33];
+  strlcpy(activeSetupSsid, WIFI_SETUP_FALLBACK_SSID, sizeof(activeSetupSsid));
+  uint32_t restartAt = 0;
   server.on("/api/health", HTTP_GET, [&]() {
     String json; json.reserve(900);
     json = "{\"reset_reason\":\"";
@@ -2119,6 +2291,34 @@ void wifiTask(void *) {
     server.sendHeader("Cache-Control", "no-store");
     server.send(202, "application/json", String("{\"queued\":true,\"action\":\"") + action + "\"}");
   });
+  server.on("/api/wifi", HTTP_POST, [&]() {
+    if (server.header("X-Dashboard-Request") != "1") {
+      server.send(403, "text/plain", "Dashboard request required"); return;
+    }
+    if (server.arg("boot") != bootId) {
+      server.send(409, "text/plain", "Board restarted; wait for fresh status and try again"); return;
+    }
+    const String ssid = server.arg("ssid"), password = server.arg("password");
+    bool clean = ssid.length() > 0 && ssid.length() <= 32 && password.length() <= 63 &&
+      (password.length() == 0 || password.length() >= 8);
+    for (unsigned i = 0; i < ssid.length(); ++i) clean &= uint8_t(ssid[i]) >= 0x20;
+    for (unsigned i = 0; i < password.length(); ++i) clean &= uint8_t(password[i]) >= 0x20;
+    if (!clean) {
+      server.send(400, "text/plain", "SSID: 1-32 bytes; password: empty for open network or 8-63 bytes"); return;
+    }
+    WifiConfig next;
+    next.magic = WIFI_CONFIG_MAGIC;
+    strlcpy(next.ssid, ssid.c_str(), sizeof(next.ssid));
+    strlcpy(next.password, password.c_str(), sizeof(next.password));
+    if (!logPreferencesReady || logPreferences.putBytes("wifi", &next, sizeof(next)) != sizeof(next)) {
+      server.send(500, "text/plain", "Could not save Wi-Fi settings"); return;
+    }
+    wifiConfig = next;
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(202, "application/json", "{\"saved\":true,\"restarting\":true}");
+    restartAt = millis() + 1500;
+    logf("Wi-Fi settings saved for SSID '%s'; restarting\n", wifiConfig.ssid);
+  });
   server.on("/api/settings", HTTP_POST, [&]() {
     if (server.header("X-Dashboard-Request") != "1") {
       server.send(403, "text/plain", "Dashboard request required"); return;
@@ -2135,6 +2335,7 @@ void wifiTask(void *) {
         server.send(500, "text/plain", "Could not save interval; setting unchanged"); return;
       }
       logIntervalMs.store(value);
+      gaStepMs.store(value);
       logf("Recording interval saved: %lu ms\n", (unsigned long)value);
     }
     server.sendHeader("Cache-Control", "no-store");
@@ -2180,6 +2381,9 @@ void wifiTask(void *) {
     if (device == DEV_SD && enabled == "1" && !ENABLE_SD_LOGGING) {
       server.send(409, "text/plain", "SD disabled: set ENABLE_SD_LOGGING=true in include/runtime_config.h after installing a card"); return;
     }
+    if (device == DEV_SD && enabled == "0" && ENABLE_SD_LOGGING) {
+      server.send(409, "text/plain", "SD recording is automatic while recording is active"); return;
+    }
     const uint32_t newMask = enabled == "1" ? oldMask | (1U << device) : oldMask & ~(1U << device);
     if (oldMask != newMask) {
       if (!logPreferencesReady || logPreferences.putUInt("devices", newMask) != sizeof(uint32_t)) {
@@ -2203,38 +2407,10 @@ void wifiTask(void *) {
     server.send(200, "application/json", String("{\"boot\":\"") + bootId + "\",\"devices_mask\":" + enabledDevices.load() + ",\"control_revision\":" + deviceControlRevision + "}");
   });
   server.on("/api/ga-frequency", HTTP_POST, [&]() {
-    if (server.header("X-Dashboard-Request") != "1") { server.send(403, "text/plain", "Dashboard request required"); return; }
-    const String raw = server.arg("hz"); char *end = nullptr;
-    const float hz = strtof(raw.c_str(), &end);
-    const uint32_t period = gaPeriodForHz(hz);
-    if (!raw.length() || raw.length() > 16 || end == raw.c_str() || *end || !period) {
-      server.send(400, "text/plain", "GA step frequency must be 0.2-20 Hz"); return;
-    }
-    if (period != gaStepMs.load()) {
-      if (!logPreferencesReady || logPreferences.putUInt("ga_step_ms", period) != sizeof(uint32_t)) {
-        server.send(500, "text/plain", "Could not save GA frequency"); return;
-      }
-      gaStepMs.store(period);
-    }
-    server.send(200, "application/json", String("{\"ga_step_ms\":") + gaStepMs.load() + "}");
+    server.send(409, "text/plain", "GA chase follows the recording interval automatically");
   });
   server.on("/api/ga", HTTP_POST, [&]() {
-    if (server.header("X-Dashboard-Request") != "1") { server.send(403, "text/plain", "Dashboard request required"); return; }
-    if (!deviceEnabled(DEV_MCP) || !supplyBusEnabled.load()) { server.send(409, "text/plain", "MCP is disabled or supply paused"); return; }
-    char command = 0;
-    if (server.arg("mode") == "chase") command = 'l';
-    else if (server.arg("mode") == "toggle") {
-      const String channel = server.arg("channel");
-      if (channel.length() == 1 && channel[0] >= '0' && channel[0] <= '3') command = 'U' + channel[0] - '0';
-    } else {
-      const String raw = server.arg("mask");
-      bool digits = raw.length() > 0 && raw.length() <= 2;
-      for (unsigned i = 0; i < raw.length(); ++i) digits &= raw[i] >= '0' && raw[i] <= '9';
-      if (digits && raw.toInt() <= 15) command = 'A' + raw.toInt();
-    }
-    if (!command) { server.send(400, "text/plain", "Invalid GA command"); return; }
-    if (!enqueueCommand(mcpCommands, command)) { server.send(503, "text/plain", "Command queue full"); return; }
-    server.send(202, "application/json", "{\"queued\":true}");
+    server.send(409, "text/plain", "GA outputs follow recording state automatically");
   });
   server.on("/api/imu", HTTP_POST, [&]() {
     if (server.header("X-Dashboard-Request") != "1") {
@@ -2267,7 +2443,8 @@ void wifiTask(void *) {
     const EncoderConfig old = getEncoderConfig();
     if (floorf(config.ppr) != config.ppr) { server.send(400, "text/plain", "PPR must be an integer"); return; }
     if (old.ppr != config.ppr || old.wheelMm != config.wheelMm || old.ratio != config.ratio) {
-      if (!logPreferencesReady || logPreferences.putBytes("encoder", &config, sizeof(config)) != sizeof(config)) {
+      if (!logPreferencesReady || logPreferences.putBytes("encoder", &config, sizeof(config)) != sizeof(config) ||
+          logPreferences.putBool("encoder_z", true) != 1) {
         server.send(500, "text/plain", "Could not save encoder config"); return;
       }
       { Lock lock(stateMutex); encoderConfig = config; dashboard.encoder.rpmValid = dashboard.encoder.speedValid = false; }
@@ -2335,31 +2512,75 @@ void wifiTask(void *) {
     json += ",\"record_buffer_pending\":" + String(recordBufferPending);
     json += ",\"record_buffer_dropped\":" + String(webRecordDropped.load());
     json += ",\"blink_ms\":" + String(debugBlinkMs.load());
+    const bool stationConnected = WiFi.status() == WL_CONNECTED;
+    json += ",\"wifi\":{\"ssid\":\"" + jsonEscape(wifiConfig.ssid) + "\",\"mode\":\"";
+    json += stationConnected ? "station_setup_ap" : (WiFi.getMode() == WIFI_AP_STA ? "setup_ap" : "connecting");
+    json += "\",\"ip\":\"" + (stationConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString()) + "\"";
+    json += ",\"ap_ssid\":\"" + jsonEscape(activeSetupSsid) + "\"";
+    json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"}";
     json += ",\"shunt_mohm\":[" + String(shunts.mohm[0], 4) + "," + String(shunts.mohm[1], 4) + "," + String(shunts.mohm[2], 4) + "]";
     const auto &mcp = record.state.mcp;
     json += ",\"encoder_config\":{\"ppr\":" + String(config.ppr, 4) + ",\"wheel_mm\":" + String(config.wheelMm, 4) + ",\"ratio\":" + String(config.ratio, 4) + "}";
     json += ",\"ga\":{\"valid\":" + String(mcp.valid && fresh(mcp.valid, record.capturedMs, mcp.updatedMs, 1000) ? "true" : "false");
     json += ",\"mask\":" + String(mcp.portA & 15) + ",\"commanded\":" + String(mcp.commandedOutputs) + ",\"chase\":" + String(mcp.chase ? "true" : "false");
+    json += ",\"safe_hold\":" + String(gaSafeHold.load() ? "true" : "false");
+    json += ",\"alert_reason\":\"" + String(gaAlertReason(token)) + "\"";
     json += ",\"stop_failed\":" + String(mcpStopFailed.load() ? "true" : "false") + "}}";
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", json);
   });
   server.onNotFound([&]() { server.send(404, "text/plain", "Not found"); });
-  bool started = false;
-  uint32_t lastRetry = millis();
+  bool started = false, apActive = false;
+  uint32_t lastRetry = millis(), lastApRetry = 0, lastApRename = 0;
+  // Keep the setup network available even while the station is connected. This
+  // lets an operator change Wi-Fi without first disabling the current router.
+  WiFi.mode(WIFI_AP_STA);
+  apActive = WiFi.softAP(activeSetupSsid, WIFI_SETUP_PASSWORD);
+  lastApRetry = millis();
+  if (apActive) logf("Wi-Fi setup always available: join %s, open http://192.168.4.1\n", activeSetupSsid);
+  else logLine("Wi-Fi setup access point failed to start; retrying");
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
-      if (!started) {
-        server.begin(); started = true;
-        logf("Wi-Fi dashboard: http://%s (same Wi-Fi network)\n", WiFi.localIP().toString().c_str());
+    const bool connected = WiFi.status() == WL_CONNECTED;
+    if (connected && millis() - lastApRename >= 1000) {
+      const String stationIp = WiFi.localIP().toString();
+      char desiredSetupSsid[33];
+      snprintf(desiredSetupSsid, sizeof(desiredSetupSsid), "ESP%s", stationIp.c_str());
+      if (stationIp != "0.0.0.0" && strcmp(activeSetupSsid, desiredSetupSsid) != 0) {
+        WiFi.mode(WIFI_AP_STA);
+        if (WiFi.softAP(desiredSetupSsid, WIFI_SETUP_PASSWORD)) {
+          strlcpy(activeSetupSsid, desiredSetupSsid, sizeof(activeSetupSsid));
+          apActive = true;
+          logf("Wi-Fi setup renamed for station IP: %s\n", activeSetupSsid);
+        } else {
+          logLine("Wi-Fi setup rename failed; keeping the previous name");
+        }
       }
-      server.handleClient();
-    } else {
-      if (started) { server.stop(); started = false; }
+      lastApRename = millis();
+    }
+    if (!connected) {
       if (millis() - lastRetry >= 15000) {
         logLine("Wi-Fi: waiting for 2.4 GHz network; reconnecting");
         WiFi.reconnect(); lastRetry = millis();
       }
+    }
+    if (!apActive && millis() - lastApRetry >= 5000) {
+      WiFi.mode(WIFI_AP_STA);
+      apActive = WiFi.softAP(activeSetupSsid, WIFI_SETUP_PASSWORD);
+      lastApRetry = millis();
+      if (apActive) logf("Wi-Fi setup restored: join %s, open http://192.168.4.1\n", activeSetupSsid);
+      else logLine("Wi-Fi setup access point failed to start; retrying");
+    }
+    const bool networkAvailable = connected || apActive;
+    if (networkAvailable && !started) {
+      server.begin(); started = true;
+      if (connected) logf("Wi-Fi dashboard: http://%s (same Wi-Fi network)\n", WiFi.localIP().toString().c_str());
+    } else if (!networkAvailable && started) {
+      server.stop(); started = false;
+    }
+    if (started) server.handleClient();
+    if (restartAt && int32_t(millis() - restartAt) >= 0) {
+      prepareGAForRestart();
+      delay(50); ESP.restart();
     }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
@@ -2368,7 +2589,7 @@ void wifiTask(void *) {
 // Desktop protocol: @H,<CSV header> and @D,<on|off|unknown|manual>,<CSV row>.
 // One UART writer owns both telemetry and human-readable diagnostics.
 void consoleTask(void *) {
-  uint32_t lastPrint = 0, lastHeader = 0;
+  uint32_t lastPrint = 0, lastHeader = 0, lastEncoderDebug = 0;
   uint32_t telemetrySequence = 0;
   bool streaming = false;
   String lastWebIp;
@@ -2383,6 +2604,10 @@ void consoleTask(void *) {
         }
       } else {
         lastWebIp = "";
+      }
+      if (SERIAL_ENCODER_DEBUG && uint32_t(millis() - lastEncoderDebug) >= 1000) {
+        lastEncoderDebug = millis();
+        printEncoderSerialDebug();
       }
       // Ignore legacy telemetry commands in IP-only mode.
       for (unsigned i = 0; i < 64 && Serial.available(); ++i) Serial.read();
@@ -2439,6 +2664,8 @@ void setup() {
   Serial.setDebugOutput(false);
   delay(1000);
   const esp_reset_reason_t reason = esp_reset_reason();
+  // After a reset, keep the warning ON until the next START once MCP is reachable.
+  gaSafeHold.store(reason != ESP_RST_POWERON);
   if (reason != ESP_RST_POWERON && reason != ESP_RST_EXT && reason != ESP_RST_DEEPSLEEP)
     Serial.printf("RESET: %s (%d)\n", resetReasonName(reason), int(reason));
 
@@ -2486,6 +2713,8 @@ void setup() {
     logLine("Supply monitor DISABLED: GPIO15 ADC off; sensors enabled; Wi-Fi stays on");
   }
   loadLogSettings();
+  // Warn immediately while the recording workers have not started yet.
+  if (deviceEnabled(DEV_MCP) && supplyBusEnabled.load() && initMCP()) setOutputs(0x0F);
   logf("Recording interval: %lu ms\n", (unsigned long)logIntervalMs.load());
   printHelp();
 
@@ -2521,9 +2750,11 @@ void setup() {
   if (ok) ok = xTaskCreatePinnedToCore(consoleTask, "console", 6144, nullptr, 1, &handles[3], WEB_CORE) == pdPASS;
   if (!ok) {
     Serial.println("FATAL: task creation failed; restarting");
+    prepareGAForRestart();
     delay(100);
     ESP.restart();
   }
+  gaStartupReady.store(true);
 }
 
 void loop() {

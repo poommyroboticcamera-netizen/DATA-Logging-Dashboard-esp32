@@ -10,3 +10,6 @@ constexpr BaseType_t SENSOR_CORE = 1;
 
 // SD card installed. This firmware requires a FAT16/FAT32 filesystem.
 constexpr bool ENABLE_SD_LOGGING = true;
+// Print a concise GPIO33 index-Z diagnostic once per second, even when
+// SERIAL_IP_ONLY is enabled. Disable after wiring checks if not needed.
+constexpr bool SERIAL_ENCODER_DEBUG = true;

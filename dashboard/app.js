@@ -8,9 +8,9 @@
   let session = new C.Session(), db = null, files = [], armed = false, lastSuccess = 0, received = false, lostSaved = false;
   let latest = null, chartPoints = [], lastChartUptime = null, requestBusy = false;
   let deviceMask = null, ga = null, controlsBusy = false, encoderDirty = false, shuntDirty = false;
-  let gaHzDirty = false, gaHzBusy = false;
   let ledDirty = false, ledBusy = false, sdAvailable = true;
-  let currentInterval = 250, intervalDirty = false, settingsBusy = false;
+  let currentInterval = 1000, intervalDirty = false, settingsBusy = false;
+  let wifiDirty = false, wifiBusy = false;
   let recordingActive = false, recordingBusy = false;
   let persistedSession = null, persistedRows = 0;
   let storageQueue = Promise.resolve(), visualTimer = 0, visualStale = false, lastVisualMs = 0;
@@ -162,8 +162,8 @@
     const wheelCurrent = wheelParts.every(Number.isFinite)
       ? wheelParts[0] - wheelParts[1] - wheelParts[2] : null;
     $('gauge-iwheel-current').textContent = fmt(wheelCurrent, 2);
-    $('rpm').textContent = fmt(valid('rpm_valid') ? n('shaft_rpm') : null, 1);
-    $('encoder-note').textContent = !C.enabled(deviceMask, 'encoder') ? '· ปิดการอ่าน Encoder' : valid('speed_valid') ? '· คำนวณจากขนาดล้อและอัตราทดที่ตั้งไว้' : valid('rpm_valid') ? '· RPM พร้อม · ต้องตั้งขนาดล้อ/อัตราทด' : '· รอ Encoder / ตรวจค่า P/R';
+    $('rpm').textContent = fmt(valid('speed_valid') ? n('wheel_rpm') : null, 1);
+    $('encoder-note').textContent = !C.enabled(deviceMask, 'encoder') ? '· ปิดการอ่าน Encoder' : valid('speed_valid') ? '· รอบล้อ = รอบ Encoder จาก Z ที่ GPIO33 ÷ อัตราทด' : valid('rpm_valid') ? '· รอบ Encoder พร้อม · ต้องตั้งขนาดล้อ/อัตราทด' : '· รอพัลส์ Z / ตรวจจำนวนพัลส์ต่อรอบ';
     $('clock').textContent = valid('rtc_valid') ? data.rtc_datetime : '—';
     $('clock-note').textContent = valid('rtc_valid') ? 'เวลาจาก RTC บนบอร์ด' : 'RTC ไม่พร้อม · ไฟล์ยังมีเวลาจากคอม';
     ['ax', 'ay', 'az'].forEach(key => $(key).textContent = fmt(valid('imu_valid') ? n('imu_' + key + '_ms2') : null));
@@ -267,20 +267,28 @@
       const button = $('device-' + id); if (!button) return;
       const on = C.enabled(deviceMask, id);
       button.setAttribute('aria-pressed', String(on)); button.disabled = !online || deviceMask === null || !deviceState.boot || controlsBusy;
-      if (id === 'sd' && !sdAvailable) { button.disabled = true; button.textContent = 'SD card · ยังไม่ได้ติดตั้ง'; return; }
+      if (id === 'sd') { button.disabled = true; button.textContent = sdAvailable ? 'SD card · บันทึกอัตโนมัติ' : 'SD card · ยังไม่ได้ติดตั้ง'; return; }
       button.textContent = label + ' · ' + (deviceMask === null ? 'รอข้อมูล' : on ? 'เปิดอยู่ · กดปิด' : 'ปิดอยู่ · กดเปิด');
     });
-    const available = online && C.enabled(deviceMask, 'mcp') && ga?.valid && !controlsBusy;
+    const available = online && C.enabled(deviceMask, 'mcp') && ga?.valid;
     for (let i = 0; i < 4; ++i) {
       const button = $('ga-' + i); if (!button) continue;
-      const on = !!(ga?.mask & (1 << i)); button.setAttribute('aria-pressed', String(available && on));
-      button.textContent = 'GA' + i + ' · ' + (available ? on ? 'ON' : 'OFF' : '—'); button.disabled = !available;
+      const on = !!(ga?.mask & (1 << i)); button.setAttribute('data-on', String(available && on));
+      button.textContent = 'GA' + i + ' · ' + (available ? on ? 'ON' : 'OFF' : '—');
     }
-    $('ga-all-off').disabled = !online || !C.enabled(deviceMask, 'mcp') || controlsBusy;
-    $('ga-chase').disabled = !available;
-    $('ga-status').textContent = !online ? 'ขาดการเชื่อมต่อ' : ga?.stop_failed ? 'ยืนยัน GA OFF ไม่สำเร็จ' : !C.enabled(deviceMask, 'mcp') ? 'MCP ปิด' : !ga?.valid ? 'MCP ไม่พร้อม' : ga.mask !== ga.commanded ? 'รอยืนยันเอาต์พุต' : ga.chase ? 'ไฟไล่ทำงาน' : 'อ่านเอาต์พุตแล้ว';
+    const gaWarning = {
+      reset_hold: 'หลังรีเซต · GA ติดทั้งหมดจนกดเริ่มบันทึก',
+      startup_pending: 'กำลังเริ่มระบบบันทึก · GA ติดทั้งหมด',
+      supply_off: 'ไฟเลี้ยงไม่พร้อม · สั่ง GA ติดทั้งหมดเมื่อ MCP ใช้งานได้',
+      sd_disabled: 'SD ไม่พร้อม · GA ติดทั้งหมด',
+      sd_error: 'บันทึก SD ผิดพลาด · GA ติดทั้งหมด',
+      sd_not_ready: 'กำลังรอ SD เขียนแถวแรก · GA ติดทั้งหมด',
+      sd_closing: 'หยุดบันทึก · รอ SD ปิดก่อนดับ GA'
+    }[ga?.alert_reason];
+    $('ga-status').textContent = !online ? 'ขาดการเชื่อมต่อ' : ga?.stop_failed ? 'ยืนยันเอาต์พุต GA ไม่สำเร็จ' : !C.enabled(deviceMask, 'mcp') ? 'MCP ปิด' : !ga?.valid ? 'MCP ไม่พร้อม · ยืนยันไฟเตือนไม่ได้' : ga.mask !== ga.commanded ? 'รอยืนยันเอาต์พุต' : gaWarning || (ga.chase ? 'กำลังบันทึก · ไฟวิ่ง' : 'หยุดบันทึก · GA ดับทั้งหมด');
     $('encoder-apply').disabled = !online || controlsBusy;
     $('shunt-apply').disabled = !online || controlsBusy;
+    $('wifi-apply').disabled = !online || wifiBusy || !deviceState.boot;
     $('record-start').disabled = !online || recordingActive || recordingBusy;
     $('record-stop').disabled = !online || !recordingActive || recordingBusy;
   }
@@ -335,10 +343,7 @@
       const result = ingestState(packet);
       currentInterval = result.parsed.intervalMs;
       if (Number.isInteger(packet.ga_step_ms)) {
-        const hz = 1000 / packet.ga_step_ms;
-        if (!gaHzDirty && !gaHzBusy) $('ga-hz').value = hz.toFixed(3);
-        $('ga-hz-apply').disabled = gaHzBusy;
-        $('ga-hz-note').textContent = `${hz.toFixed(2)} ครั้ง/วินาที · ${packet.ga_step_ms} ms ต่อขา · ครบ GA3→GA0 ใน ${packet.ga_step_ms * 4} ms`;
+        $('ga-hz-note').textContent = `ไฟวิ่งทุก ${packet.ga_step_ms} ms ต่อขา ตามช่วงเวลาบันทึก · ครบ GA3→GA0 ใน ${packet.ga_step_ms * 4} ms`;
       }
       if (Number.isInteger(packet.blink_ms)) {
         if (!ledDirty && !ledBusy) $('blink-ms').value = packet.blink_ms;
@@ -350,6 +355,14 @@
       if (!intervalDirty && !settingsBusy) $('interval-ms').value = currentInterval;
       $('interval-apply').disabled = settingsBusy || packet.interval_ms == null;
       if (!settingsBusy) $('interval-status').textContent = `ค่าที่บอร์ดใช้: ${currentInterval} ms · ${(1000 / currentInterval).toFixed(2)} แถว/วินาทีโดยประมาณ`;
+      if (packet.wifi && typeof packet.wifi.ssid === 'string') {
+        if (!wifiDirty && !wifiBusy) $('wifi-ssid').value = packet.wifi.ssid;
+        const mode = packet.wifi.mode === 'station_setup_ap' ? 'เชื่อมต่อเครือข่ายแล้ว · จุดตั้งค่าเปิดอยู่' :
+          packet.wifi.mode === 'station' ? 'เชื่อมต่อเครือข่ายแล้ว' :
+          packet.wifi.mode === 'setup_ap' ? 'โหมดตั้งค่า Wi-Fi สำรอง' : 'กำลังเชื่อมต่อ';
+        const setup = packet.wifi.ap_ssid ? ` · ตั้งค่าผ่าน ${packet.wifi.ap_ssid} ที่ ${packet.wifi.ap_ip || '192.168.4.1'}` : '';
+        $('wifi-status').textContent = `${mode} · ${packet.wifi.ssid || 'ยังไม่ตั้งชื่อเครือข่าย'} · IP ${packet.wifi.ip || '—'}${setup}`;
+      }
       latest = result.parsed; lastSuccess = Date.now(); received = true; lostSaved = false;
       if (/^(กำลังรอ ESP32|การเชื่อมต่อขาด|ข้อมูลจากบอร์ดไม่ถูกต้อง)/.test($('alert').textContent)) alert('');
       $('link-dot').className = 'live'; $('link-text').textContent = 'เชื่อมต่อแล้ว';
@@ -358,7 +371,7 @@
       if (packet.encoder_config) {
         const config = packet.encoder_config;
         if (!encoderDirty && !controlsBusy) { $('encoder-ppr').value = config.ppr; $('encoder-wheel').value = config.wheel_mm; $('encoder-ratio').value = config.ratio || ''; }
-        $('encoder-config-note').textContent = `บอร์ดใช้ ${config.ppr} P/R · ล้อ ${config.wheel_mm} mm · อัตราทด ${config.ratio || 'ยังไม่ตั้ง'} · ×4 อัตโนมัติ`;
+        $('encoder-config-note').textContent = `บอร์ดอ่าน Z ที่ GPIO33 · ${config.ppr} พัลส์/รอบ · ล้อ ${config.wheel_mm} mm · อัตราทด ${config.ratio || 'ยังไม่ตั้ง'} · ไม่คูณ ×4`;
       }
       if (Array.isArray(packet.shunt_mohm) && packet.shunt_mohm.length === 3) {
         if (!shuntDirty && !controlsBusy) packet.shunt_mohm.forEach((v, i) => $('shunt-' + (i + 1)).value = v);
@@ -425,6 +438,25 @@
     $('record-start').onclick = () => setRecording('start');
     $('record-stop').onclick = () => setRecording('stop');
     $('save').firstChild.textContent = 'ดาวน์โหลด CSV ตอนนี้ ';
+    ['wifi-ssid', 'wifi-password'].forEach(id => $(id).oninput = () => { wifiDirty = true; });
+    $('wifi-form').onsubmit = async event => {
+      event.preventDefault(); if (wifiBusy) return;
+      const ssid = $('wifi-ssid').value.trim(), password = $('wifi-password').value;
+      const ssidBytes = new TextEncoder().encode(ssid).length;
+      const passwordBytes = new TextEncoder().encode(password).length;
+      if (ssidBytes < 1 || ssidBytes > 32) { $('wifi-status').textContent = 'ชื่อ Wi-Fi ต้องยาว 1–32 ไบต์'; return; }
+      if (passwordBytes > 63 || (passwordBytes > 0 && passwordBytes < 8)) { $('wifi-status').textContent = 'รหัสผ่านต้องยาว 8–63 ไบต์ หรือเว้นว่างสำหรับเครือข่ายไม่มีรหัส'; return; }
+      wifiBusy = true; renderControls();
+      $('wifi-status').textContent = 'กำลังบันทึก Wi-Fi ลง ESP32…';
+      try {
+        if (!deviceState.boot) throw Error('รอสถานะล่าสุดจากบอร์ด');
+        await controlPost('/api/wifi', {ssid, password, boot: deviceState.boot});
+        wifiDirty = false; $('wifi-password').value = '';
+        $('wifi-status').textContent = 'บันทึกแล้ว · บอร์ดกำลังรีสตาร์ตและเชื่อมต่อ Wi-Fi ใหม่';
+        alert('บันทึก Wi-Fi แล้ว · เชื่อมอุปกรณ์นี้เข้ากับเครือข่ายใหม่ จากนั้นเปิด IP ใหม่ของ ESP32');
+      } catch (error) { $('wifi-status').textContent = 'บันทึก Wi-Fi ไม่สำเร็จ: ' + error.message; }
+      finally { wifiBusy = false; renderControls(); }
+    };
     $('imu-calibrate').onclick = async () => {
       if (controlsBusy) return;
       controlsBusy = true; renderControls();
@@ -462,21 +494,9 @@
       $('device-controls').append(button);
     });
     for (let i = 0; i < 4; ++i) {
-      const button = document.createElement('button'); button.id = 'ga-' + i; button.disabled = true; button.textContent = 'GA' + i;
-      button.onclick = () => command('/api/ga', { mode: 'toggle', channel: String(i) }, 'ส่งคำสั่ง GA แล้ว'); $('ga-controls').append(button);
+      const button = document.createElement('div'); button.id = 'ga-' + i; button.textContent = 'GA' + i;
+      $('ga-controls').append(button);
     }
-    $('ga-all-off').onclick = () => command('/api/ga', { mask: '0' }, 'ส่งคำสั่งปิด GA ทั้งหมดแล้ว');
-    $('ga-hz').oninput = () => { gaHzDirty = true; };
-    $('ga-hz-form').onsubmit = async event => {
-      event.preventDefault(); if (gaHzBusy) return;
-      const hz = Number($('ga-hz').value);
-      if (!Number.isFinite(hz) || hz < .2 || hz > 20) { alert('ความถี่ GA ต้องอยู่ระหว่าง 0.2–20 Hz'); return; }
-      gaHzBusy = true; $('ga-hz-apply').disabled = true;
-      try { await controlPost('/api/ga-frequency', {hz}); gaHzDirty = false; }
-      catch (error) { alert('บันทึกความถี่ GA ไม่สำเร็จ: ' + error.message); }
-      finally { gaHzBusy = false; }
-    };
-    $('ga-chase').onclick = () => command('/api/ga', { mode: 'chase' }, 'ส่งคำสั่งไฟไล่แล้ว');
     ['encoder-ppr', 'encoder-wheel', 'encoder-ratio'].forEach(id => $(id).oninput = () => { encoderDirty = true; });
     $('encoder-form').onsubmit = async event => {
       event.preventDefault(); if (controlsBusy) return;
@@ -531,9 +551,17 @@
     $('save').onclick = async () => { const done = session.finish('manual'); if (done) { await persist([done]); if (!armed) download(done); } recordingUI(); };
     $('arm').onclick = () => { armed = !armed; $('arm').textContent = armed ? 'ดาวน์โหลดอัตโนมัติ: เปิด' : 'เปิดการดาวน์โหลดอัตโนมัติ'; $('save-note').textContent = armed ? 'หากเบราว์เซอร์บล็อก ให้ดาวน์โหลดจากรายการไฟล์' : 'ไฟล์ยังสำรองในรายการเมื่อจบรอบ'; };
     const navLinks = [...document.querySelectorAll('nav a[href^="#"]')];
-    navLinks.forEach(link => link.addEventListener('click', () => {
-      navLinks.forEach(item => { item.classList.toggle('active', item === link); if (item === link) item.setAttribute('aria-current', 'location'); else item.removeAttribute('aria-current'); });
-    }));
+    const syncNav = () => {
+      const hash = location.hash || '#overview';
+      navLinks.forEach(item => {
+        const active = item.getAttribute('href') === hash;
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'location');
+        else item.removeAttribute('aria-current');
+      });
+    };
+    window.addEventListener('hashchange', syncNav);
+    syncNav();
     window.addEventListener('resize', () => scheduleVisuals(false));
     window.addEventListener('beforeunload', event => { if (session.active?.rows.length) { event.preventDefault(); event.returnValue = ''; } });
     // Poll from an absolute deadline so visual/storage delays do not accumulate
