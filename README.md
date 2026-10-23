@@ -1,29 +1,33 @@
+**Language:** English · [ไทย](README_TH.md)
+
+The dashboard and its GitHub Pages demo start in English. Select **ไทย** in the header to switch to Thai; the browser remembers your choice.
+
 # ESP32 Data Logging Dashboard · v2.0
 
 <p align="center"><img src="dashboard/assets/somboon-logo.png" alt="Somboon Advance Technology" width="160"></p>
 
-แดชบอร์ดสำหรับดูค่าเซนเซอร์และบันทึกข้อมูลลง SD card/CSV ผ่าน ESP32 ใช้ Wi‑Fi 2.4 GHz เปิดดูจากโทรศัพท์หรือคอมพิวเตอร์ในเครือข่ายเดียวกันได้ หน้าเว็บฝังอยู่ในเฟิร์มแวร์: อัปโหลดครั้งเดียวได้ทั้งโปรแกรมและหน้าเว็บ
+Dashboard for viewing sensor values ​​and saving data to SD card/CSV via ESP32 using 2.4 GHz Wi‑Fi. Can be viewed from a phone or computer on the same network. Web pages embedded in firmware: Upload both programs and web pages once.
 
-[ลองหน้าเว็บตัวอย่าง](https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/) · [วิธีติดตั้ง](#เริ่มใช้งาน) · [วิธีบันทึกข้อมูล](#บันทึกข้อมูล) · [แก้ปัญหาเบื้องต้น](#แก้ปัญหาเบื้องต้น)
+[Try a sample web page](https://poommyroboticcamera-netizen.github.io/DATA-Logging-Dashboard-esp32/) · [How to install](#get-started) · [How to save data](#save-data) · [Solve basic problems](#solve-basic-problems)
 
-> **หน้าเว็บตัวอย่างบน GitHub Pages ใช้ข้อมูลจำลอง** ปุ่มต่าง ๆ ในหน้านั้นไม่สั่ง ESP32 จริง หากจะตั้งค่า Wi‑Fi หรือบันทึกจากบอร์ด ให้เปิดหน้าเว็บจาก IP ของ ESP32 หรือจุดตั้งค่า `192.168.4.1`
+> **The sample web page on GitHub Pages uses simulated data** The buttons on the page do not actually command the ESP32 to set up Wi‑Fi or save from the board. Open a web page from the ESP32's IP or setup point. `192.168.4.1`
 
-## มีอะไรใน v2.0
+## What's in v2.0
 
-- ดู INA226 สามช่อง, DHT22, DS18B20 สี่ตัว, IMU, RTC, Encoder และสถานะการบันทึกแบบสด
-- เริ่ม/หยุดบันทึกจากหน้าเว็บหรือปุ่มบนบอร์ด ตั้งช่วงบันทึกได้ **100–60,000 ms** (ค่าเริ่มต้น **1,000 ms**)
-- บันทึก CSV ลง SD card ขณะกด START เท่านั้น; เมื่อกด STOP ระบบเขียนข้อมูลที่ค้างให้เสร็จและปิด SD
-- ตั้ง Wi‑Fi ใหม่จากหน้าเว็บได้ แม้ยังต่อเราเตอร์เดิมไม่ได้ เพราะ ESP32 เปิดจุดตั้งค่า Wi‑Fi ของตัวเอง
-- อ่านสัญญาณ **Z ของ Encoder ที่ GPIO33**; หน้าเว็บแสดง **WHEEL RPM (รอบล้อ)** ซึ่งคำนวณจากอัตราทดลูกกลิ้ง
-- มีไฟ GA0–GA3 บอกสถานะการเขียน SD และมีบรรทัด `[ENC Z]` ทาง Serial สำหรับตรวจสาย Encoder
+- View three channel INA226, DHT22, four DS18B20, IMU, RTC, Encoder and live recording status.
+- Start/stop recording from web pages or board buttons. Set recording interval **100–60,000 ms** (default **1,000 ms**)
+- Save CSV to SD card only while pressing START; When you press STOP, the system finishes writing the remaining data and turns off the SD.
+- You can reset your Wi‑Fi from the web page. Even though you still can't connect to the original router, because the ESP32 opens its own Wi‑Fi setting point.
+- Read signal **Z of Encoder at GPIO33**; The web page shows **WHEEL RPM (wheel revolutions)** which is calculated from the roller ratio.
+- There are GA0–GA3 lights indicating the SD writing status and a line. `[ENC Z]` Serial for checking Encoder cables
 
-รุ่นก่อนหน้าอยู่ที่แท็ก [v1.0](https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32/tree/v1.0) ส่วนรุ่นนี้อยู่ที่ [v2.0](https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32/tree/v2.0) ทั้งสองรุ่นไม่มี CAN bus
+The previous version is on the tag. [v1.0](https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32/tree/v1.0) This version is at [v2.0](https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32/tree/v2.0) Both models do not have a CAN bus.
 
-## เริ่มใช้งาน
+## Get started
 
-ต้องมีบอร์ด ESP32, สาย USB สำหรับอัปโหลด, [VS Code + PlatformIO](https://platformio.org/install/ide?install=vscode) หรือ PlatformIO CLI และการต่อเซนเซอร์ตาม [ตารางขา](#ขาและอุปกรณ์หลัก) หากจะบันทึกลง SD ให้ใส่การ์ด **FAT16/FAT32** ก่อนเริ่ม (exFAT ใช้ไม่ได้)
+Must have ESP32 board, USB upload cable, [VS Code + PlatformIO](https://platformio.org/install/ide?install=vscode) or PlatformIO CLI and connecting sensors accordingly [table legs](#legs-and-main-equipment) If you want to save to SD, insert the **FAT16/FAT32** card before starting (exFAT doesn't work).
 
-1. ดาวน์โหลดหรือโคลนโปรเจกต์ แล้วสร้างไฟล์ Wi‑Fi ส่วนตัวจากไฟล์ตัวอย่าง:
+1. Download or clone a project Then create a personal Wi‑Fi file from the example file:
 
    ```powershell
    git clone https://github.com/poommyroboticcamera-netizen/DATA-Logging-Dashboard-esp32.git
@@ -31,86 +35,86 @@
    Copy-Item include/wifi_config.example.h include/wifi_config.h
    ```
 
-   บน macOS/Linux ใช้ `cp include/wifi_config.example.h include/wifi_config.h` แทน `Copy-Item` จะใส่ชื่อ/รหัส Wi‑Fi 2.4 GHz ใน `include/wifi_config.h` ตอนนี้ก็ได้ หรือปล่อยข้อความตัวอย่างไว้แล้วตั้งค่าผ่านจุดตั้งค่าของ ESP32 หลังอัปโหลด ไฟล์ `wifi_config.h` ถูก Git เพิกเฉยและไม่ควรพุชขึ้นสาธารณะ
+   On macOS/Linux use `cp include/wifi_config.example.h include/wifi_config.h` instead `Copy-Item` The Wi‑Fi 2.4 GHz name/password will be entered in `include/wifi_config.h` You can now, or leave the sample text and set it via the ESP32 settings after uploading the file. `wifi_config.h` It was ignored by Git and should not have been publicly pushed.
 
-2. ต่อบอร์ดผ่าน USB เลือกพอร์ตให้ถูก แล้วกด **Upload** ใน PlatformIO หรือใช้คำสั่ง:
+2. Connect the board via USB, select the correct port, then press **Upload** in PlatformIO or use the command:
 
    ```sh
    pio run -e esp32dev -t upload
    pio device monitor -b 115200
    ```
 
-   ปิด Serial Monitor อื่นก่อนอัปโหลด หลังอัปโหลดไม่ต้องคัดลอกไฟล์ HTML ลง SD อีก
+   Close other Serial Monitors before uploading. After uploading, there is no need to copy the HTML file to SD again.
 
-3. เปิดแดชบอร์ดด้วยวิธีใดวิธีหนึ่ง:
+3. Open the dashboard in one of the following ways:
 
-   - **ผ่านเราเตอร์:** ต่อโทรศัพท์/คอมกับ Wi‑Fi เดียวกัน แล้วเปิด IP ที่บอร์ดแสดงทาง Serial เช่น `http://192.168.1.50/`
-   - **ผ่านจุดตั้งค่าของ ESP32:** ต่อ Wi‑Fi ชื่อ `ESP192.168.4.1` รหัส `88888888` แล้วเปิด `http://192.168.4.1/` หากบอร์ดต่อเราเตอร์ได้แล้ว ชื่อจุดตั้งค่าอาจเปลี่ยนเป็น `ESP` ตามด้วย IP ที่เราเตอร์แจก เช่น `ESP192.168.1.50`
+   - **Through the router:** Connect the phone/computer to the same Wi‑Fi and open the IP that the board shows via Serial, e.g. `http://192.168.1.50/`
+   - **Through the ESP32 setup point:** Connect Wi‑Fi name `ESP192.168.4.1` code `88888888` then open `http://192.168.4.1/` If the board can connect to the router The set point name may be changed to `ESP` Followed by the IP that the router gives out, for example: `ESP192.168.1.50`
 
-4. ต้องการเปลี่ยนเราเตอร์ให้กดเมนู **ตั้งค่า Wi‑Fi** ใส่ SSID/รหัสผ่านของเครือข่าย **2.4 GHz** แล้วกด **บันทึกและเชื่อมต่อใหม่** บอร์ดจะรีสตาร์ต; หลังจากนั้นเปิด IP ใหม่หรือกลับเข้าผ่านจุดตั้งค่า
+4. To change the router, press the menu **Wi‑Fi Settings**, enter the SSID/password of the **2.4 GHz** network, and press **Save and reconnect** The board will restart; After that, open a new IP or return through the settings point.
 
-> เมื่อเชื่อมกับจุดตั้งค่าของ ESP32 โทรศัพท์อาจแจ้งว่า “ไม่มีอินเทอร์เน็ต” ให้คงการเชื่อมต่อนี้ไว้เพื่อเปิด `192.168.4.1` ถ้าหน้าเว็บหลังอัปโหลดดูเป็นรุ่นเก่า ให้รีเฟรชแบบไม่ใช้แคช (`Ctrl+F5`)
+> When connected to the ESP32's setup point, the phone may say “No Internet”, keep this connection open to open `192.168.4.1` If the web page after upload looks old Refresh without using the cache (`Ctrl+F5`)
 
-## บันทึกข้อมูล
+## Save data
 
-1. ตรวจว่าหน้าเว็บแสดงค่าปัจจุบันและใส่ SD card แบบ FAT16/FAT32 แล้ว ตั้ง **ช่วงเวลาบันทึก** ตามต้องการ; ค่าเริ่มต้น 1,000 ms และบอร์ดจำค่าที่ตั้งไว้ (บอร์ดจะตรวจพบการ์ดจริงเมื่อกดเริ่มเท่านั้น)
-2. กด **เริ่มบันทึก** บนเว็บหรือปุ่ม START บนบอร์ด บอร์ดจะสร้างรอบบันทึกใหม่และเริ่มเขียน CSV ลง SD
-3. กด **หยุดบันทึก** บนเว็บหรือปุ่ม STOP รอให้บอร์ดเขียนแถวที่ค้างและปิด SD ก่อนถอดการ์ด
-4. ไฟล์บน SD อยู่ในโฟลเดอร์ `/logs/` เช่น `log_00001.csv` ถ้าถอดการ์ดหลังปิด SD แล้วจึงนำไฟล์ไปเปิดบนคอมได้ หน้า **Logs** แสดงเฉพาะสำเนา CSV ที่เบราว์เซอร์เก็บไว้และให้ดาวน์โหลด/ลบสำเนานั้น ไม่ได้ลบไฟล์บน SD
+1. Make sure the web page shows the current settings and that a FAT16/FAT32 SD card is inserted. Set the **record interval** as desired; The default value is 1000 ms and the board remembers the set value. (The board will only detect the actual card when Start is pressed.)
+2. Press **Start Recording** on the web or the START button on the board. The board will create a new recording cycle and begin writing the CSV to SD.
+3. Press **Stop recording** on the web or STOP button, wait for the board to write the stuck row and turn off the SD before removing the card.
+4. Files on SD are in folder `/logs/` such as `log_00001.csv` If you remove the card after turning off the SD card and can then open the file on your computer, the **Logs** page will only display the CSV copy your browser stored and allow you to download/delete that copy. Didn't delete files on SD
 
-เมื่อไม่ได้บันทึก บอร์ดยังแสดงค่าปัจจุบันแต่ไม่เปิดอ่าน/เขียน SD การตั้งช่วงเวลา 100 ms ไม่ได้ทำให้เซนเซอร์ทุกตัวอ่านใหม่ทุก 100 ms; ค่าใดอัปเดตช้ากว่าจะใช้ค่าล่าสุดพร้อมตัวบอกอายุข้อมูล
+When not recorded The board still displays the current value but does not enable SD read/write. Setting the interval to 100 ms does not cause all sensors to read again every 100 ms; Which values ​​update more slowly will use the latest value with data age indicator.
 
-### ไฟ GA0–GA3 หมายถึงอะไร
+### What do the GA0–GA3 lights mean?
 
-| สถานะ | ไฟ GA |
+| status | GA lights |
 |---|---|
-| ระบบเริ่มต้น หรือเริ่มบันทึกแต่ SD ยังไม่เขียนแถวแรก | ติดทั้ง 4 ดวง |
-| SD เขียนแถวแรกสำเร็จและกำลังบันทึก | ไฟวิ่ง GA3 → GA0 ตามช่วงเวลาบันทึก |
-| กดหยุดและกำลังรอ SD ปิด | ติดทั้ง 4 ดวง |
-| หยุดบันทึกและ SD ปิดเรียบร้อย | ดับทั้ง 4 ดวง |
-| SD เขียนผิดพลาด หรือหลังรีเซตที่ไม่ใช่การเปิดไฟใหม่ | ติดทั้ง 4 ดวงเพื่อเตือน |
+| The system starts up or starts recording but the SD has not yet written the first row. | All 4 are attached. |
+| SD has successfully written the first row and is saving. | Running lights GA3 → GA0 according to the recording time. |
+| Press stop and wait for SD to turn off. | All 4 are attached. |
+| Recording stopped and SD turned off successfully. | All 4 lights go out. |
+| SD write error or after reset that does not turn on the power again | Put on all 4 lights to warn. |
 
-ไฟเตือนต้องอาศัย MCP23017 และไฟเลี้ยงของมัน หากอุปกรณ์นี้หรือ I²C ใช้งานไม่ได้ ระบบไม่สามารถรับประกันสถานะไฟได้
+The warning light relies on the MCP23017 and its power supply. If this device or the I²C is inoperable, power status cannot be guaranteed.
 
-## เข้าใจค่า Encoder และ CSV
+## Understand Encoder and CSV values
 
-- สายสัญญาณ **Z → GPIO33**, GND ต้องร่วมกัน และสัญญาณที่เข้าขา ESP32 ต้องไม่เกิน **3.3 V** ถ้า Encoder ส่ง 5 V ต้องแปลงระดับก่อน
-- ค่าเริ่มต้นสมมติว่า Z ให้ **1 พัลส์ต่อ 1 รอบ Encoder** โปรดตรวจสเปก Encoder ของจริง ระบบไม่อ่าน A/B จึงไม่รู้ทิศหมุน
-- ลูกกลิ้ง Encoder เส้นผ่านศูนย์กลาง **43 mm** สัมผัสล้อ **63 mm** ดังนั้น `RPM ล้อ = RPM Encoder × 43/63` เมื่อไม่ลื่น การ์ด **WHEEL RPM** บนเว็บใช้ค่านี้ ไม่ใช่ค่า PWM ของมอเตอร์
-- ใน CSV คอลัมน์ `RPMencoder` และ `shaft_rpm` คือรอบแกน Encoder; `wheel_rpm` คือรอบล้อที่คำนวณแล้ว หากลูกกลิ้งลื่น ตัวเลขรอบล้อ/ความเร็วจะคลาดเคลื่อน
-- INA226: **Battery 0x44 → Vbat/Ibat**, **Rotary 0x45 → Vrotary/Irotary**, **Camera 0x40 → Vcamera/Icamera**; `Iwheel = Ibat - Irotary - Icamera` ค่าเริ่มต้น Rshunt ของแต่ละช่องคือ 1 mΩ และควรตั้งให้ตรงกับฮาร์ดแวร์จริง
-- ไฟล์ CSV ยังมีเวลา RTC, อุณหภูมิ, IMU, สถานะความถูกต้อง/อายุข้อมูลของเซนเซอร์, จำนวนพัลส์ และช่วงเวลาบันทึก เริ่มไฟล์ใหม่ `sequence` จะเริ่มนับใหม่
+- Signal wires **Z → GPIO33**, GND must be together and the signal entering the ESP32 pin must not exceed **3.3 V**. If the Encoder sends 5 V, it must convert the level first.
+- The default value assumes that Z gives **1 pulse per 1 Encoder revolution** Please check the actual encoder specs. The system doesn't read A/B so it doesn't know the direction of rotation.
+- Encoder roller diameter **43 mm** contact with wheels **63 mm** therefore `Wheel RPM = RPM Encoder × 43/63` When not slipping, the **WHEEL RPM** cards on the web use this value, not the motor's PWM value.
+- In the CSV column `RPMencoder` and `shaft_rpm` is around the encoder axis; `wheel_rpm` is the calculated wheel circumference. If the roller slips Wheel rpm/speed numbers will be inaccurate.
+- INA226: **Battery 0x44 → Vbat/Ibat**, **Rotary 0x45 → Vrotary/Irotary**, **Camera 0x40 → Vcamera/Icamera**; `Iwheel = Ibat - Irotary - Icamera` The default Rshunt for each channel is 1 mΩ and should be set to match the actual hardware.
+- The CSV file also contains RTC time, temperature, IMU, sensor accuracy/lifetime status, pulse count, and recording interval. Start a new file `sequence` will start counting again
 
-สัญญาณ Z ที่ 1 พัลส์/รอบของลูกกลิ้ง 43 mm มีระยะประมาณ 135 mm ต่อพัลส์ จึงเหมาะกับการอ่านรอบมากกว่าระยะทางละเอียด และต้องได้อย่างน้อยสองพัลส์ก่อนประมาณ RPM ครั้งแรก
+The Z signal at 1 pulse/cycle of a 43 mm roller has a distance of approximately 135 mm per pulse, making it more suitable for reading revolutions than fine distances. And at least two pulses must be obtained before the first RPM is estimated.
 
-## ขาและอุปกรณ์หลัก
+## Legs and main equipment
 
-| อุปกรณ์ | ขา ESP32 / I²C |
+| equipment | ESP32 / I²C pin |
 |---|---|
 | I²C SDA / SCL | GPIO21 / GPIO22 |
 | INA226 Camera / Rotary / Battery | `0x40` / `0x45` / `0x44` |
-| IMU MPU6050/MPU6500 · RTC MCP7940N · MCP23017 | `0x68` หรือ `0x69` · `0x6F` · `0x27` |
+| IMU MPU6050/MPU6500 · RTC MCP7940N · MCP23017 | `0x68` or `0x69` · `0x6F` · `0x27` |
 | Encoder Z | GPIO33 |
 | DHT22 | GPIO4 |
-| DS18B20 1–4 | GPIO27 / 16 / 13 / 14 (สาย DATA แยกกัน) |
+| DS18B20 1–4 | GPIO27 / 16 / 13 / 14 (separate DATA cable) |
 | SD CS / SCK / MISO / MOSI | GPIO5 / 18 / 19 / 23 |
-| ปุ่ม START / STOP | GPIO36 / GPIO39, active LOW, ต้องมี pull-up ภายนอก |
-| ไฟ Debug | GPIO2 |
+| START / STOP button | GPIO36 / GPIO39, active LOW, requires external pull-up |
+| Debug light | GPIO2 |
 
-ตรวจ [เอกสารฮาร์ดแวร์](hardware/README.md) และลายวงจรของบอร์ดจริงก่อนต่อไฟ รุ่น schematic เก่าบางฉบับระบุ START เป็น GPIO34 แต่ค่าเริ่มต้นเฟิร์มแวร์ v2.0 ใช้ GPIO36
+check [Hardware documentation](hardware/README.md) and the circuit diagram of the actual board before connecting power. Some old schematic versions specify START as GPIO34, but the default firmware v2.0 uses GPIO36.
 
-## แก้ปัญหาเบื้องต้น
+## Solve basic problems
 
-| อาการ | จุดที่ควรตรวจ |
+| symptom | Points that should be checked |
 |---|---|
-| ไม่พบ Wi‑Fi ของ ESP32 | ตรวจว่าอัปโหลด v2.0 แล้ว, ไฟเลี้ยงและ Serial 115200; ชื่อ AP อาจเปลี่ยนจาก `ESP192.168.4.1` เป็น `ESP` ตามด้วย IP ของบอร์ด |
-| กดบันทึก Wi‑Fi ไม่ได้ | ต้องเปิดหน้าเว็บที่ ESP32 เสิร์ฟ ไม่ใช่หน้าเดโมบน GitHub หรือไฟล์ `tmp/dashboard-redesign.html` |
-| Encoder เป็น `—` หรือไม่เพิ่มพัลส์ | ตรวจ Z ที่ GPIO33, GND ร่วม, ระดับ 3.3 V, เปิดอ่าน Encoder; ดูบรรทัด `[ENC Z]` ทาง Serial ค่า `total` ควรเพิ่มเมื่อหมุน |
-| รอบล้อไม่ตรงจริง | ตรวจพัลส์ Z ต่อรอบ, อัตราทด 63/43, ขนาดล้อจริง และการลื่นของลูกกลิ้ง |
-| SD ไม่มีไฟล์/ไฟ GA ติดค้าง | ตรวจการ์ด FAT16/FAT32, สาย SPI, `sd_status`/`sd_written`; อย่าถอดการ์ดก่อน STOP ปิด SD เสร็จ |
-| บอร์ดรีเซตเอง | อ่านสาเหตุที่ `/api/health` และดู [คู่มือแก้ปัญหา](docs/troubleshooting.md) |
+| ESP32's Wi‑Fi cannot be found. | Verify that v2.0 has been uploaded, power supply and Serial 115200; AP name may change from `ESP192.168.4.1` is `ESP` followed by the IP of the board |
+| Can't press record on Wi‑Fi | The web page served by the ESP32 must be opened, not the demo page on GitHub or the file. `tmp/dashboard-redesign.html` |
+| Encoder is `—` or not add pulses | Check Z at GPIO33, GND common, level 3.3 V, open to read Encoder; view line `[ENC Z]` via Serial `total` It should be added when rotating. |
+| The wheel circumference isn't really straight. | Check Z pulse per revolution, 63/43 ratio, actual wheel size and roller slippage. |
+| SD has no files/GA light stays on | Check FAT16/FAT32 card, SPI cable, `sd_status`/`sd_written`; Do not remove the card before STOP turns off the SD. |
+| The board resets itself. | Read why `/api/health` and see [Troubleshooting guide](docs/troubleshooting.md) |
 
-## สำหรับผู้พัฒนา
+## For developers
 
 ```sh
 node dashboard/core.test.cjs
@@ -120,6 +124,6 @@ python scripts/test_firmware_csv.py
 pio run -e esp32dev
 ```
 
-`src/main.cpp` คือเฟิร์มแวร์, `dashboard/` คือหน้าเว็บที่ฝังในโปรแกรม, `scripts/build_dashboard_demo.py` สร้างหน้าเดโม, `hardware/` เก็บเอกสารวงจรและ PCB ดูรายละเอียด API/การบันทึกที่ [dashboard/README.md](dashboard/README.md)
+`src/main.cpp` is firmware, `dashboard/` is the web page embedded in the program, `scripts/build_dashboard_demo.py` Create a demo page, `hardware/` Documents circuits and PCBs. See API/logging for details. [dashboard/README.md](dashboard/README.md)
 
-> **ความปลอดภัย:** จุดตั้งค่าใช้รหัสเริ่มต้นที่ระบุข้างต้น และ HTTP บนบอร์ดไม่มีระบบล็อกอิน ควรใช้ในเครือข่ายที่เชื่อถือได้เท่านั้น ไม่เปิดพอร์ตบอร์ดตรงสู่อินเทอร์เน็ต หากใช้กับอุปกรณ์จริง ให้ทดสอบความแม่นยำและความทนทานบนฮาร์ดแวร์ก่อนใช้งานต่อเนื่อง
+> **Security:** The setup point uses the default code specified above and there is no HTTP login on the board. It should only be used on trusted networks. Do not open the board port directly to the internet. If used with real equipment Test the hardware for accuracy and durability before continuing use.

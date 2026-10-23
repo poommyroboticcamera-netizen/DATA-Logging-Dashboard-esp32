@@ -9,7 +9,7 @@ def build(root):
     ui = root / 'dashboard'
     html = (ui / 'index.html').read_text(encoding='utf-8')
     html = html.replace('__COMPANY_LOGO__', 'data:image/png;base64,' + base64.b64encode((ui / 'assets/somboon-logo.png').read_bytes()).decode('ascii'))
-    for marker, file in [('/*__STYLE__*/', 'style.css'), ('/*__CORE__*/', 'core.js'), ('/*__MODEL__*/', 'imu-model.js'), ('/*__APP__*/', 'app.js')]:
+    for marker, file in [('/*__STYLE__*/', 'style.css'), ('/*__CORE__*/', 'core.js'), ('/*__MODEL__*/', 'imu-model.js'), ('/*__APP__*/', 'app.js'), ('/*__LANGUAGE__*/', 'language.js')]:
         html = html.replace(marker, (ui / file).read_text(encoding='utf-8'))
     data = gzip.compress(html.encode('utf-8'), mtime=0)
     lines = [','.join(f'0x{b:02x}' for b in data[i:i+24]) for i in range(0, len(data), 24)]
